@@ -10,6 +10,7 @@
     <RootNamespace>SingleFileMc.Packager</RootNamespace>
 
     <PublishAot>true</PublishAot>
+    <PublishTrimmed>false</PublishTrimmed>
     <StripSymbols>true</StripSymbols>
     <StackTraceSupport>true</StackTraceSupport>
     <InvariantGlobalization>true</InvariantGlobalization>
