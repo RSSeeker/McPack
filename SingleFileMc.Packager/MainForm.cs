@@ -434,8 +434,6 @@ internal sealed class MainForm : Form
         _btnGameDir.Enabled = !packaging;
         _txtJdkDir.Enabled = !packaging;
         _btnJdkDir.Enabled = !packaging;
-        _txtStubPath.Enabled = !packaging;
-        _btnStubPath.Enabled = !packaging;
         _txtOutput.Enabled = !packaging;
         _btnOutput.Enabled = !packaging;
         _btnPackage.Enabled = !packaging;
