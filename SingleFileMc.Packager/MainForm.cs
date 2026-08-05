@@ -35,13 +35,6 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "SingleFileMc 打包器";
-        // PHASE19: 窗口图标取自 exe 图标 (assets/app.ico)
-        try
-        {
-            using Icon? exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            if (exeIcon is not null) { Icon = (Icon)exeIcon.Clone(); }
-        }
-        catch { /* 图标缺失不影响使用 */ }
         ClientSize = new Size(720, 620);
         MinimumSize = new Size(600, 540);
         StartPosition = FormStartPosition.CenterScreen;
