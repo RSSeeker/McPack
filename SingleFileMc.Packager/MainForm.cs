@@ -76,7 +76,7 @@ internal sealed class MainForm : Form
         var btnRefreshSync = new Button
         {
             Text = "刷新",
-            Width = 80,
+            AutoSize = true,
             Height = 26,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 4, 0, 0),
