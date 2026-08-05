@@ -840,12 +840,9 @@ internal static partial class FakeFileSystem
         }
     }
 
-    // ------------------------------------------------------------------ run12: kernelbase CreateFileW
-    // JVM 的 java.io.FileInputStream (Security.loadMaster 读 conf\security\java.security 等 JDK
-    // conf 文件) 走 kernelbase CreateFileW —— 本 25H2 构建上 kernelbase 对文件打开用 direct-syscall,
-    // 完全绕过 ntdll hook, 假句柄/假盘方案对这类打开无效。方案: 托管 detour 直接挂
-    // kernelbase!CreateFileW (MinHook 原生重载, [UnmanagedCallersOnly] 回调), Z:\ 的 JDK conf
-    // 路径重写为 %TEMP%\sfmc-modules\conf\ 下的物化真实文件 (容器仍是数据源)。
+    // ---- kernelbase CreateFileW hook (25H2 direct-syscall bypass) ----
+    // 25H2 kernelbase CreateFileW/ReadFile 使用 direct syscall 绕过 ntdll hook,
+    // 因此 Z: 路径的 conf 文件需重写到物化真实磁盘, 其余容器文件在本钩子内直接创建假句柄。
 
     private unsafe delegate IntPtr D_CreateFileW(char* lpFileName, uint dwDesiredAccess, uint dwShareMode,
         void* lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
@@ -884,35 +881,30 @@ internal static partial class FakeFileSystem
             string? rest = StripZPrefix(s);
             if (rest is not null)
             {
-                // PHASE16: Z: 文件走 CreateFileW (kernelbase -> 内层 NtCreateFile 已被本 hook
-                // 抑制, 不能再依赖 ntdll 特判)。lib\modules 与 JDK conf 树均已去物化
-                // (ModulesRealPath=null, 无 conf 重写): 全部与 MC 数据树 jar 同机制 ——
-                // 放行给 kernelbase, 由内层 NtCreateFile 经 ntdll hook 以假句柄服务
-                // (jimage 打开链实测可 hook, 见 Hook_NtCreateFile 注释; PHASE12 反汇编证明
-                // kernelbase CreateFileW 零 direct syscall)。
                 string key = "";
                 bool isDir = false;
                 bool mapHit = Container.Active && Container.TryMapKey(rest, out key, out isDir) && !isDir;
-                // PHASE18: natives 虚拟区 (Z:\cache\natives\...) 同样需释放守卫, 让内层
-                // NtCreateFile hook 以虚拟假句柄服务 (否则真内核收 Z: 路径 -> 全部失败)。
                 bool nativesHit = IsVirtualPath(rest);
                 if (mapHit || nativesHit)
                 {
-                    // PHASE19: 25H2 kernelbase CreateFileW 已改用 direct-syscall (见 line 845
-                    // 注释), 原策略"释放守卫 -> 调 _origCreateFileW! -> 内层 NtCreateFile 经 ntdll
-                    // hook 服务"不再有效: direct-syscall 完全绕过 ntdll hook, 真内核收 Z: 路径
-                    // -> 全失败 -> toRealPath 抛 FileSystemException。
-                    // 新策略: 直接在本钩子内创建假句柄 (与 Hook_NtCreateFile / Hook_NtOpenFile
-                    // 同逻辑), 不再依赖内层 ntdll hook。
                     _suppressHooks--;
                     try
                     {
                         if (nativesHit)
                         {
-                            // 虚拟 natives 区: 放行给 kernelbase, 由内层 NtCreateFile hook 服务
-                            // (natives 路径不走 toRealPath, direct-syscall 不影响此场景)
                             return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                 dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+                        }
+                        // JDK conf 文件: 重写到物化真实磁盘 (ReadFile 也走 direct-syscall 绕过 NtReadFile hook)
+                        if (key.Length > 0 && key.StartsWith(Container.JdkPrefix + "/conf/", StringComparison.Ordinal))
+                        {
+                            string realPath = GetOrMaterializeConfFile(key);
+                            if (VerboseHooks) { Log($"[CreateFileW] conf redirect '{s}' -> '{realPath}'"); }
+                            fixed (char* pReal = realPath)
+                            {
+                                return _origCreateFileW!(pReal, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
+                                    dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+                            }
                         }
                         // 容器数据树: 直接创建假句柄 (绕过 direct-syscall)
                         string? real = TryMap(rest);
@@ -943,7 +935,7 @@ internal static partial class FakeFileSystem
         finally { _suppressHooks--; }
     }
 
-    /// <summary>预热期物化整个 JDK conf 树 (detour 前: JIT 安全 + 首开零延迟)。</summary>
+    /// <summary>预热期物化整个 JDK conf 树到磁盘 (detour 前, JIT 安全)。</summary>
     public static void MaterializeConfTree()
     {
         if (!Container.Active) { return; }
@@ -963,11 +955,10 @@ internal static partial class FakeFileSystem
         Console.WriteLine($"[prejit] materialized JDK conf tree ({ConfMaterialized.Count} files)");
     }
 
-    // ------------------------------------------------------------------ run13: GetFinalPathNameByHandleW
-    // JDK 21+ WindowsLinkSupport.getRealPath (toRealPath) 调用 GetFinalPathNameByHandleW 获取
-    // 最终路径。其内部使用 NtQueryObject(ObjectNameInformation) 而非 NtQueryInformationFile,
-    // NtQueryObject 未 hook -> 假句柄查询失败 -> FileSystemException("找不到文件")。
-    // 方案: 托管 detour 直接挂 kernel32!GetFinalPathNameByHandleW, 假句柄返回 Z: 路径。
+    // ---- kernelbase GetFinalPathNameByHandleW hook (JDK 21+ toRealPath) ----
+    // JDK 21+ toRealPath 调用 GetFinalPathNameByHandleW, 其内部使用 NtQueryObject
+    // (未 hook) 而非 NtQueryInformationFile, 假句柄查询失败 -> FileSystemException。
+    // 本钩子对假句柄直接返回 Z: 路径。
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe uint Managed_GetFinalPathNameByHandleW(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags)
@@ -1007,13 +998,7 @@ internal static partial class FakeFileSystem
         finally { _suppressHooks--; }
     }
 
-    /// <summary>
-    /// PHASE15: 删除整个 <gameDir>\cache (物化 modules + natives 提取), 幂等。
-    /// 预热期调用 (Program.PreJitWarmup 最前: 清上次崩溃残留, pre-detour 无 hook 干扰);
-    /// 退出路径调用 (McLaunch.CleanupTempArtifacts, 已 JIT 预热, post-detour 真实路径透传)。
-    /// 游戏进程仍存活时被占用文件删除失败 -> 捕获记录, 残留位于 gameDir 内 (非 %TEMP%),
-    /// 下次启动清理。
-    /// </summary>
+    /// <summary>删除 gameDir\cache (物化 modules + natives 提取), 幂等。预热期与退出路径调用。</summary>
     public static void CleanupCache()
     {
         try

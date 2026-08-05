@@ -129,7 +129,7 @@ dotnet publish McPack.Packager -c Release -r win-x64
    ├─ 3. AutoDetectVersionId()   自动扫描 versions/ 目录，发现版本 ID
    ├─ 4. BuildFromVersionJson()  解析 version.json → 动态读取 mainClass、assetIndex
    ├─ 5. SyncFromManifest()      读取 .mcpack-sync 清单，按需同步到 game/
-   ├─ 6. FakeFileSystem.Init()   安装 19 个 ntdll hook（MinHook.NET 原生 detour）
+   ├─ 6. FakeFileSystem.Init()   安装 19 个 ntdll hook + 2 个 kernelbase 托管 detour
    ├─ 7. JNI_CreateJavaVM        进程内创建 JVM；jvm.dll 优先真实磁盘加载，
    │                             缺失时经假 SEC_IMAGE 从容器内存加载
    └─ 8. McLaunch.Run()          构建 Z:\ 类路径 → natives 虚拟化到
@@ -156,11 +156,13 @@ dotnet publish McPack.Packager -c Release -r win-x64
 | 目录枚举 | `NtQueryDirectoryFile` `NtQueryDirectoryFileEx` |
 | 句柄 | `NtDuplicateObject` |
 | 写入与锁 | `NtWriteFile` `NtLockFile` `NtUnlockFile` |
+| **kernelbase 托管 detour** | `CreateFileW` `GetFinalPathNameByHandleW` |
 
 关键机制：
 
 - **`Z:\` 虚拟根**：JVM 与游戏的路径访问被改写到 `Z:\openjdk\...`、`Z:\minecraft\...`，由容器条目表直接服务。
 - **假句柄表**：`NtCreateFile`/`NtOpenFile` 对容器内文件与虚拟 natives 文件返回伪造句柄（文件 `0x5100xxxx`、section `0x52000000|n`），真实句柄一律放行到原 trampoline。
+- **25H2 direct-syscall 兼容**：`kernelbase!CreateFileW` 和 `kernelbase!ReadFile` 在 Windows 25H2 上使用 direct syscall 绕过 ntdll hook。对此，`CreateFileW` 托管 detour 直接创建假句柄（容器 jar 文件），或重写路径到物化真实磁盘文件（JDK conf 文件如 `java.security`）；`GetFinalPathNameByHandleW` 托管 detour 对假句柄直接返回 `Z:\` 路径，解决 JDK 21+ `toRealPath` 的 `FileSystemException`。
 - **虚拟可写区**：仅 `Z:\cache\natives\` 子树可写，natives 提取与运行期 JNA/LWJGL/Netty 写入全走内存虚拟文件表，其余 `Z:\` 保持只读。
 - **假 `SEC_IMAGE`**：`NtCreateSection` / `NtMapViewOfSection` 对容器内 PE 文件（如 `jvm.dll`）做纯托管 PE32+ 解析 + 手工镜像布局，内存里按节加载，不落盘。
 - **JNI 进程内 JVM**：加载 `jvm.dll` → `JNI_CreateJavaVM` → 在宿主进程内直接跑 Minecraft。类路径全部是 `Z:\...` 虚拟路径。
@@ -273,7 +275,7 @@ McPack/
 - **natives 完全虚拟化**：natives 提取与运行期 JNA/LWJGL/Netty 写入全走虚拟 `Z:\cache\natives\` 内存区，真实 `game\cache` 零 natives、`%TEMP%` 零残留。
 - **JNA `File.createTempFile` 在虚拟区不可用**：仅造成 SystemReport/OSHI 路径的 log4j WARN（装饰性，非致命），游戏照常启动到主菜单。
 - **离线单机**：Realms 登录、微软账号、多人联机登录均不可用；离线身份由 exe 文件名决定。
-- **仅 Windows x64**：ntdll hook 与 VFS 机制深度绑定 Windows 内核接口。
+- **仅 Windows x64**：ntdll hook 与 VFS 机制深度绑定 Windows 内核接口。Windows 25H2 上 `kernelbase` 部分 API 使用 direct syscall 绕过 ntdll hook，已通过额外的 `CreateFileW` / `GetFinalPathNameByHandleW` 托管 detour 兼容。
 
 ---
 
