@@ -176,6 +176,8 @@ internal static class McLaunch
         Vars["${assets_index_name}"] = AssetIndex;
         Vars["${auth_uuid}"] = "12345678-1234-1234-1234-1234567890ab";
         Vars["${auth_access_token}"] = "00000FFF00000FFF00000FFF00000FFF";
+        Vars["${user_properties}"] = "{}";
+        Vars["${user_type}"] = "legacy";
         Vars["${clientid}"] = "SingleFileMc";
         Vars["${auth_xuid}"] = "";
         Vars["${version_type}"] = "release";
@@ -254,6 +256,25 @@ internal static class McLaunch
     private static void AutoDetectVersionId()
     {
         const string versionsDir = "minecraft/versions";
+
+        // PHASE19: 打包器版本选择标记优先 —— 多版本 .minecraft 打包时可指定启动哪个版本。
+        const string markerKey = "minecraft/.sfmc-version";
+        string? marker = null;
+        if (Container.Active && Container.HasEntry(markerKey))
+        {
+            marker = System.Text.Encoding.UTF8.GetString(Container.ReadAllBytes(markerKey)).Trim().TrimStart('\uFEFF');
+        }
+        else if (!Container.Active)
+        {
+            string diskMarker = Path.Combine(DiskMcRoot, ".sfmc-version");
+            if (File.Exists(diskMarker)) { marker = File.ReadAllText(diskMarker).Trim().TrimStart('\uFEFF'); }
+        }
+        if (!string.IsNullOrEmpty(marker))
+        {
+            VersionId = marker;
+            Console.WriteLine($"[mc] version from packager marker: {VersionId}");
+            return;
+        }
 
         if (Container.Active)
         {
@@ -372,21 +393,27 @@ internal static class McLaunch
         NativesSources = [.. natives];
 
         var jvm = new List<string>();
-        foreach (JsonElement a in root.GetProperty("arguments").GetProperty("jvm").EnumerateArray())
+        // PHASE19: 老版本 (1.7.10 等) 无 "arguments" 字段 —— jvm 参数留空 (CreateStageOpts
+        // 的 classpath/-Xshare:off/java.home/natives/ErrorFile 兜底已足够), 不抛 KeyNotFound。
+        bool hasModernArgs = root.TryGetProperty("arguments", out JsonElement argsRoot);
+        if (hasModernArgs && argsRoot.TryGetProperty("jvm", out JsonElement jvmEl))
         {
-            if (a.ValueKind == JsonValueKind.String)
+            foreach (JsonElement a in jvmEl.EnumerateArray())
             {
-                string s = a.GetString() ?? "";
-                if (s == "-cp" || s == "${classpath}") { continue; } // replaced by -Djava.class.path
-                jvm.Add(Substitute(s));
-            }
-            else if (RulesAllow(a))
-            {
-                // "value" may be a plain string (e.g. -XX:HeapDumpPath=...) or a string array
-                foreach (string s in ArgValues(a.GetProperty("value")))
+                if (a.ValueKind == JsonValueKind.String)
                 {
-                    if (s == "-cp" || s == "${classpath}") { continue; }
+                    string s = a.GetString() ?? "";
+                    if (s == "-cp" || s == "${classpath}") { continue; } // replaced by -Djava.class.path
                     jvm.Add(Substitute(s));
+                }
+                else if (RulesAllow(a))
+                {
+                    // "value" may be a plain string (e.g. -XX:HeapDumpPath=...) or a string array
+                    foreach (string s in ArgValues(a.GetProperty("value")))
+                    {
+                        if (s == "-cp" || s == "${classpath}") { continue; }
+                        jvm.Add(Substitute(s));
+                    }
                 }
             }
         }
@@ -409,18 +436,30 @@ internal static class McLaunch
         JvmArgs = [.. merged];
 
         var ga = new List<string>();
-        foreach (JsonElement a in root.GetProperty("arguments").GetProperty("game").EnumerateArray())
+        if (hasModernArgs && argsRoot.TryGetProperty("game", out JsonElement gameEl))
         {
-            if (a.ValueKind == JsonValueKind.String)
+            foreach (JsonElement a in gameEl.EnumerateArray())
             {
-                ga.Add(Substitute(a.GetString() ?? ""));
-            }
-            else if (RulesAllow(a))
-            {
-                foreach (string s in ArgValues(a.GetProperty("value")))
+                if (a.ValueKind == JsonValueKind.String)
                 {
-                    ga.Add(Substitute(s));
+                    ga.Add(Substitute(a.GetString() ?? ""));
                 }
+                else if (RulesAllow(a))
+                {
+                    foreach (string s in ArgValues(a.GetProperty("value")))
+                    {
+                        ga.Add(Substitute(s));
+                    }
+                }
+            }
+        }
+        else if (root.TryGetProperty("minecraftArguments", out JsonElement oldArgs))
+        {
+            // 老版本 (1.7.10 等): minecraftArguments 是单字符串模板, 按空白分词替换。
+            string raw = oldArgs.GetString() ?? "";
+            foreach (string tok in raw.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                ga.Add(Substitute(tok));
             }
         }
         GameArgs = [.. ga];

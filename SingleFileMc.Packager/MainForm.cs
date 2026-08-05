@@ -21,7 +21,9 @@ internal sealed class MainForm : Form
     private readonly Button _btnJdkDir;
     private readonly TextBox _txtOutput;
     private readonly Button _btnOutput;
+    private readonly ComboBox _cmbVersion;
     private readonly CheckedListBox _lstSync;
+    private readonly TextBox _txtSyncCustom;
     private readonly ProgressBar _progress;
     private readonly Label _lblProgress;
     private readonly TextBox _txtLog;
@@ -43,7 +45,7 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 3,
-            RowCount = 6,
+            RowCount = 9,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
@@ -72,16 +74,17 @@ internal sealed class MainForm : Form
         _btnOutput = AddButton(layout, "浏览...", row, OnBrowseOutput);
         row++;
 
-        AddLabel(layout, "同步到 game/:", row);
-        _lstSync = new CheckedListBox
+        AddLabel(layout, "打包版本:", row);
+        _cmbVersion = new ComboBox
         {
+            DropDownStyle = ComboBoxStyle.DropDownList,
             Dock = DockStyle.Fill,
             Margin = new Padding(0, 4, 4, 0),
-            Height = 80,
-            IntegralHeight = false,
+            Height = 26,
         };
-        layout.Controls.Add(_lstSync, 1, row);
-        var btnRefreshSync = new Button
+        _cmbVersion.SelectedIndexChanged += (_, _) => RefreshSyncList();
+        layout.Controls.Add(_cmbVersion, 1, row);
+        var btnRefreshVersion = new Button
         {
             Text = "刷新",
             AutoSize = true,
@@ -89,8 +92,39 @@ internal sealed class MainForm : Form
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 4, 0, 0),
         };
+        btnRefreshVersion.Click += (_, _) => RefreshVersions();
+        layout.Controls.Add(btnRefreshVersion, 2, row);
+        row++;
+
+        AddLabel(layout, "同步到 game/:", row);
+        _lstSync = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 4, 4, 0),
+            Height = 90,
+            IntegralHeight = false,
+        };
+        layout.Controls.Add(_lstSync, 1, row);
+        var syncBtnPanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 4, 0, 0),
+        };
+        var btnRefreshSync = new Button { Text = "刷新", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 3) };
         btnRefreshSync.Click += (_, _) => RefreshSyncList();
-        layout.Controls.Add(btnRefreshSync, 2, row);
+        var btnSelectAll = new Button { Text = "全选", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 3) };
+        btnSelectAll.Click += (_, _) => ToggleSelectAll();
+        syncBtnPanel.Controls.Add(btnRefreshSync);
+        syncBtnPanel.Controls.Add(btnSelectAll);
+        layout.Controls.Add(syncBtnPanel, 2, row);
+        row++;
+
+        AddLabel(layout, "自定义同步:", row);
+        _txtSyncCustom = AddTextBox(layout, row);
+        var btnSyncAdd = AddButton(layout, "添加", row, OnAddSyncPath);
+        row++;
         row++;
 
         _progress = new ProgressBar
@@ -257,6 +291,7 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _txtGameDir.Text = dlg.SelectedPath;
+            RefreshVersions();
             RefreshSyncList();
         }
     }
@@ -294,6 +329,81 @@ internal sealed class MainForm : Form
         return appData;
     }
 
+    /// <summary>扫描 versions/ 目录填充版本下拉框 ("全部版本" + 各版本 id)。</summary>
+    private void RefreshVersions()
+    {
+        string? prev = _cmbVersion.SelectedItem as string;
+        _cmbVersion.Items.Clear();
+        _cmbVersion.Items.Add("全部版本");
+
+        string gameDir = _txtGameDir.Text.Trim();
+        if (!string.IsNullOrEmpty(gameDir))
+        {
+            string versionsDir = Path.Combine(gameDir, "versions");
+            if (Directory.Exists(versionsDir))
+            {
+                foreach (string dir in Directory.EnumerateDirectories(versionsDir))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (string.IsNullOrEmpty(name) || name.StartsWith('.')) continue;
+                    if (File.Exists(Path.Combine(dir, name + ".json")))
+                    {
+                        _cmbVersion.Items.Add(name);
+                    }
+                }
+            }
+        }
+
+        int idx = prev is not null ? _cmbVersion.Items.IndexOf(prev) : -1;
+        _cmbVersion.SelectedIndex = Math.Max(0, idx);
+    }
+
+    /// <summary>全选/全不选 切换 (同步清单)。</summary>
+    private void ToggleSelectAll()
+    {
+        bool allChecked = _lstSync.Items.Count > 0;
+        for (int i = 0; i < _lstSync.Items.Count; i++)
+        {
+            if (!_lstSync.GetItemChecked(i)) { allChecked = false; break; }
+        }
+        for (int i = 0; i < _lstSync.Items.Count; i++)
+        {
+            _lstSync.SetItemChecked(i, !allChecked);
+        }
+    }
+
+    /// <summary>添加自定义同步路径: 支持 "相对路径" 或 "容器源|gameDir目标"。</summary>
+    private void OnAddSyncPath(object? sender, EventArgs e)
+    {
+        string input = _txtSyncCustom.Text.Trim().TrimStart('\uFEFF');
+        if (string.IsNullOrEmpty(input)) return;
+
+        string source = input;
+        string dest = input;
+        int sep = input.IndexOf('|');
+        if (sep > 0)
+        {
+            source = input[..sep].Trim();
+            dest = input[(sep + 1)..].Trim();
+        }
+        if (source.Length == 0 || dest.Length == 0) return;
+
+        string gameDir = _txtGameDir.Text.Trim();
+        if (!string.IsNullOrEmpty(gameDir))
+        {
+            string fullSource = Path.Combine(gameDir, source.Replace('/', '\\'));
+            if (!Directory.Exists(fullSource))
+            {
+                MessageBox.Show(this, $"路径不存在: {source}\n(相对 .minecraft 根目录)", "同步路径无效",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+        }
+
+        _lstSync.Items.Add(new SyncEntry(source + (sep > 0 ? "|" + dest : ""), $"{source} (自定义)"), true);
+        _txtSyncCustom.Clear();
+    }
+
     private void RefreshSyncList()
     {
         _lstSync.Items.Clear();
@@ -322,6 +432,12 @@ internal sealed class MainForm : Form
             {
                 string instName = Path.GetFileName(inst);
                 if (string.IsNullOrEmpty(instName) || instName.StartsWith('.')) continue;
+                // 已选择具体版本时, 只列出该实例的同步目录
+                if (_cmbVersion.SelectedIndex > 0
+                    && !string.Equals(instName, _cmbVersion.SelectedItem as string, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
                 foreach (string sub in commonDirs)
                 {
                     string fullPath = Path.Combine(inst, sub);
@@ -384,7 +500,8 @@ internal sealed class MainForm : Form
 
         _cts = new CancellationTokenSource();
         var syncPaths = _lstSync.CheckedItems.Cast<SyncEntry>().Select(e => e.Manifest).ToList();
-        var engine = new PackagerEngine(gameDir, jdkDir, stubPath, outputPath, syncPaths);
+        string? selectedVersion = _cmbVersion.SelectedIndex > 0 ? _cmbVersion.SelectedItem as string : null;
+        var engine = new PackagerEngine(gameDir, jdkDir, stubPath, outputPath, syncPaths, selectedVersion);
         engine.ProgressChanged += OnEngineProgress;
         engine.LogMessage += OnEngineLog;
 

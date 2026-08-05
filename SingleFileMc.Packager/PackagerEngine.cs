@@ -9,6 +9,7 @@ internal sealed class PackagerEngine
     private readonly string _stubPath;
     private readonly string _outputPath;
     private readonly IReadOnlyList<string> _syncPaths;
+    private readonly string? _selectedVersion;
 
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -20,13 +21,15 @@ internal sealed class PackagerEngine
     public event EventHandler<ProgressEventArgs>? ProgressChanged;
     public event EventHandler<LogEventArgs>? LogMessage;
 
-    public PackagerEngine(string gameDir, string jdkDir, string stubPath, string outputPath, IReadOnlyList<string>? syncPaths = null)
+    public PackagerEngine(string gameDir, string jdkDir, string stubPath, string outputPath,
+        IReadOnlyList<string>? syncPaths = null, string? selectedVersion = null)
     {
         _gameDir = Path.GetFullPath(gameDir);
         _jdkDir = Path.GetFullPath(jdkDir);
         _stubPath = stubPath;
         _outputPath = outputPath;
         _syncPaths = syncPaths ?? Array.Empty<string>();
+        _selectedVersion = string.IsNullOrWhiteSpace(selectedVersion) ? null : selectedVersion.Trim();
     }
 
     public bool Pack(CancellationToken ct)
@@ -51,7 +54,7 @@ internal sealed class PackagerEngine
             List<string> allFiles = new();
             List<string> allDirs = new();
 
-            ScanDirectory(_gameDir, "minecraft", allFiles, allDirs, ct);
+            ScanDirectory(_gameDir, "minecraft", allFiles, allDirs, ct, _selectedVersion);
             ScanDirectory(_jdkDir, "openjdk", allFiles, allDirs, ct);
 
             Log($"扫描完成: {allFiles.Count} 个文件, {allDirs.Count} 个目录");
@@ -99,6 +102,17 @@ internal sealed class PackagerEngine
                     using var mfWriter = new StreamWriter(mfStream);
                     mfWriter.Write(manifest);
                     Log($"同步清单: {string.Join(", ", _syncPaths)}");
+                }
+
+                // PHASE19: 版本选择标记 —— 多版本 .minecraft 打包时启动器优先读它 (否则
+                // AutoDetectVersionId 取 versions/ 下第一个含 json 的目录, 可能与所选不符)。
+                if (_selectedVersion is not null)
+                {
+                    ZipArchiveEntry mv = zip.CreateEntry("minecraft/.sfmc-version", CompressionLevel.NoCompression);
+                    using Stream mvStream = mv.Open();
+                    using var mvWriter = new StreamWriter(mvStream);
+                    mvWriter.Write(_selectedVersion);
+                    Log($"打包版本: {_selectedVersion} (其余版本目录已跳过)");
                 }
             }
 
@@ -152,7 +166,8 @@ internal sealed class PackagerEngine
         }
     }
 
-    private void ScanDirectory(string rootDir, string zipPrefix, List<string> allFiles, List<string> allDirs, CancellationToken ct)
+    private void ScanDirectory(string rootDir, string zipPrefix, List<string> allFiles, List<string> allDirs,
+        CancellationToken ct, string? onlyVersion = null)
     {
         if (!Directory.Exists(rootDir))
         {
@@ -175,6 +190,15 @@ internal sealed class PackagerEngine
             {
                 string subName = Path.GetFileName(subDir);
                 if (IsExcluded(subName, subDir)) continue;
+
+                // PHASE19: 选择单版本时, 只打包 versions/<所选版本>, 其余版本目录整体跳过
+                // (assets/libraries/根目录等共享树仍然全量打包)。
+                if (onlyVersion is not null
+                    && currentPrefix.EndsWith("/versions", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(subName, onlyVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
                 string entryPrefix = currentPrefix + "/" + subName;
                 allDirs.Add(entryPrefix);
