@@ -16,4 +16,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="..\SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe"
+                      LogicalName="SingleFileMc.stub.bin"
+                      Condition="Exists('..\SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe')" />
+  </ItemGroup>
+
 </Project>

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.IO.Compression;
 using System.Linq;
+using System.Reflection;
 
 namespace SingleFileMc.Packager;
 
@@ -10,8 +11,6 @@ internal sealed class MainForm : Form
     private readonly Button _btnGameDir;
     private readonly TextBox _txtJdkDir;
     private readonly Button _btnJdkDir;
-    private readonly TextBox _txtStubPath;
-    private readonly Button _btnStubPath;
     private readonly TextBox _txtOutput;
     private readonly Button _btnOutput;
     private readonly CheckedListBox _lstSync;
@@ -36,7 +35,7 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             ColumnCount = 3,
-            RowCount = 7,
+            RowCount = 6,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
@@ -46,7 +45,6 @@ internal sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         Controls.Add(layout);
 
@@ -59,11 +57,6 @@ internal sealed class MainForm : Form
         AddLabel(layout, "JDK 目录:", row);
         _txtJdkDir = AddTextBox(layout, row);
         _btnJdkDir = AddButton(layout, "浏览...", row, OnBrowseJdkDir);
-        row++;
-
-        AddLabel(layout, "启动器 Stub:", row);
-        _txtStubPath = AddStubPathTextBox(layout, row);
-        _btnStubPath = AddButton(layout, "浏览...", row, OnBrowseStub);
         row++;
 
         AddLabel(layout, "输出文件:", row);
@@ -193,24 +186,27 @@ internal sealed class MainForm : Form
         return tb;
     }
 
-    private static TextBox AddStubPathTextBox(TableLayoutPanel panel, int row)
+    private static string ExtractStub()
     {
+        using var stream = Assembly.GetExecutingAssembly()
+            .GetManifestResourceStream("SingleFileMc.stub.bin");
+        if (stream is not null)
+        {
+            string tmp = Path.Combine(Path.GetTempPath(), "SingleFileMc.stub.exe");
+            using var fs = File.Create(tmp);
+            stream.CopyTo(fs);
+            return tmp;
+        }
+
         string stubDir = AppContext.BaseDirectory;
         string stub = Path.Combine(stubDir, "SingleFileMc.exe");
-        if (!File.Exists(stub))
-        {
-            stub = Path.GetFullPath(Path.Combine(stubDir, "..", "..", "..", "..",
-                "SingleFileMc", "bin", "Release", "net10.0", "win-x64", "publish", "SingleFileMc.exe"));
-        }
-        var tb = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            Text = File.Exists(stub) ? stub : "",
-            Anchor = AnchorStyles.Left | AnchorStyles.Right,
-            Margin = new Padding(0, 4, 4, 0),
-        };
-        panel.Controls.Add(tb, 1, row);
-        return tb;
+        if (File.Exists(stub)) return stub;
+
+        stub = Path.GetFullPath(Path.Combine(stubDir, "..", "..", "..", "..",
+            "SingleFileMc", "bin", "Release", "net10.0", "win-x64", "publish", "SingleFileMc.exe"));
+        if (File.Exists(stub)) return stub;
+
+        return "";
     }
 
     private static TextBox AddOutputTextBox(TableLayoutPanel panel, int row)
@@ -233,7 +229,7 @@ internal sealed class MainForm : Form
         var btn = new Button
         {
             Text = text,
-            Width = 80,
+            AutoSize = true,
             Height = 26,
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 3, 0, 0),
@@ -259,15 +255,6 @@ internal sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _txtJdkDir.Text = dlg.SelectedPath;
-        }
-    }
-
-    private void OnBrowseStub(object? sender, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog { Title = "选择启动器 Stub (SingleFileMc.exe)", Filter = "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*" };
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            _txtStubPath.Text = dlg.FileName;
         }
     }
 
@@ -328,7 +315,7 @@ internal sealed class MainForm : Form
     {
         string gameDir = _txtGameDir.Text.Trim();
         string jdkDir = _txtJdkDir.Text.Trim();
-        string stubPath = _txtStubPath.Text.Trim();
+        string stubPath = ExtractStub();
         string outputPath = _txtOutput.Text.Trim();
 
         if (string.IsNullOrEmpty(gameDir) || !Directory.Exists(gameDir))
@@ -349,7 +336,7 @@ internal sealed class MainForm : Form
         }
         if (string.IsNullOrEmpty(stubPath) || !File.Exists(stubPath))
         {
-            MessageBox.Show(this, "请选择有效的启动器 Stub (SingleFileMc.exe)。\n请先构建 SingleFileMc 项目 (dotnet publish -c Release -r win-x64)。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "未找到内嵌的启动器 Stub。\n请确保打包器与 SingleFileMc 项目一起构建。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         if (string.IsNullOrEmpty(outputPath))
