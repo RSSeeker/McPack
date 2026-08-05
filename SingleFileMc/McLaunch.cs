@@ -323,6 +323,12 @@ internal static class McLaunch
         AssetIndex = root.GetProperty("assetIndex").GetProperty("id").GetString() ?? "";
         Console.WriteLine($"[mc] mainClass = {MainClass} (from json: {root.GetProperty("mainClass").GetString()})");
         Console.WriteLine($"[mc] assetIndex = {AssetIndex}");
+        // PHASE19 勘误: 占位符替换必须在参数构建 (Substitute) 之前填充 Vars —— 此前
+        // PrepareVars() 在 BuildFromVersionJson() 之后才调用, Vars 全空, --username
+        // ${auth_player_name} / --assetsDir ${assets_root} 等全部原样透传, 游戏拿不到
+        // 用户名/资源索引/存档目录 (实测: Invalid UUID '${auth_uuid}' + "Can't open the
+        // resource index file: ${assets_root}\indexes\${assets_index_name}.json")。
+        PrepareVars();
 
         var cp = new List<string>();
         var natives = new List<string>();

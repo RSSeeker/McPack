@@ -164,6 +164,15 @@ internal static partial class FakeFileSystem
     private const int STATUS_ACCESS_DENIED = unchecked((int)0xC0000022);
     private const int STATUS_SHARING_VIOLATION = unchecked((int)0xC0000043);
     private const int STATUS_OBJECT_NAME_COLLISION = unchecked((int)0xC0000035);
+    // win32 错误码 (FindFirstFileW/FindNextFileW 契约; JDK WindowsNativeDispatcher 直接用
+    // GetLastError() 抛 WindowsException —— 无匹配必须显式设置, 否则 JDK 捡到线程残留错误码)。
+    private const uint ERROR_FILE_NOT_FOUND = 2;
+    private const uint ERROR_NO_MORE_FILES = 18;
+    private const uint ERROR_ACCESS_DENIED = 5;
+    private const uint ERROR_SHARING_VIOLATION = 32;
+    private const uint ERROR_ALREADY_EXISTS = 183;
+    private const uint ERROR_INSUFFICIENT_BUFFER = 122;
+    private const uint DRIVE_FIXED = 3;
     // FILE_CREATE_DISPOSITION (phnt): 0=SUPERSEDE 1=OPEN 2=CREATE 3=OPEN_IF 4=OVERWRITE 5=OVERWRITE_IF
     private const uint FILE_DIRECTORY_FILE = 0x1;
     private const uint GENERIC_WRITE = 0x40000000;
@@ -795,7 +804,7 @@ internal static partial class FakeFileSystem
         {
             nint kernelbase = NativeLibrary.Load("kernelbase.dll");
             nint ffeTarget = NativeLibrary.GetExport(kernelbase, "FindFirstFileExW");
-            nint ffeStub = (nint)(delegate* unmanaged[Stdcall]<char*, uint, uint, void*, uint, WIN32_FIND_DATAW*, IntPtr>)&Managed_FindFirstFileExW;
+            nint ffeStub = (nint)(delegate* unmanaged[Stdcall]<char*, uint, WIN32_FIND_DATAW*, uint, void*, uint, IntPtr>)&Managed_FindFirstFileExW;
             nint ffeOrig = HookEngine.CreateHook(ffeTarget, ffeStub);
             _origFindFirstFileExW = Marshal.GetDelegateForFunctionPointer<D_FindFirstFileExW>(ffeOrig);
             _hookDelegates.Add(_origFindFirstFileExW);
@@ -842,6 +851,48 @@ internal static partial class FakeFileSystem
             _hookDelegates.Add(_origFindNextFileW_kernel32);
             Log($"[hooks] FindNextFileW(kernel32) @ 0x{fnfTarget:X} -> hooked (managed detour, orig trampoline 0x{fnfOrig:X})");
         }
+        // run19: GetVolumePathNameW —— 虚拟 Z: 盘不存在, GetVolumePathNameW 返回
+        // ERROR_DIR_NOT_ROOT (267) -> WindowsFileStore.create 抛 FileSystemException
+        // "目录不是根目录下的子目录" (Files.getFileStore 全崩)。对 Z: 路径直接返回 "Z:\"。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint gpTarget = NativeLibrary.GetExport(kernelbase, "GetVolumePathNameW");
+            nint gpStub = (nint)(delegate* unmanaged[Stdcall]<char*, char*, uint, int>)&Managed_GetVolumePathNameW;
+            nint gpOrig = HookEngine.CreateHook(gpTarget, gpStub);
+            _origGetVolumePathNameW = Marshal.GetDelegateForFunctionPointer<D_GetVolumePathNameW>(gpOrig);
+            _hookDelegates.Add(_origGetVolumePathNameW);
+            Log($"[hooks] GetVolumePathNameW @ 0x{gpTarget:X} -> hooked (managed detour, orig trampoline 0x{gpOrig:X})");
+        }
+        // run19b: GetVolumeInformationW —— WindowsFileStore ctor 读卷名/文件系统 (Z: 盘不存在必败)。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint gvTarget = NativeLibrary.GetExport(kernelbase, "GetVolumeInformationW");
+            nint gvStub = (nint)(delegate* unmanaged[Stdcall]<char*, char*, uint, uint*, uint*, uint*, char*, uint, int>)&Managed_GetVolumeInformationW;
+            nint gvOrig = HookEngine.CreateHook(gvTarget, gvStub);
+            _origGetVolumeInformationW = Marshal.GetDelegateForFunctionPointer<D_GetVolumeInformationW>(gvOrig);
+            _hookDelegates.Add(_origGetVolumeInformationW);
+            Log($"[hooks] GetVolumeInformationW @ 0x{gvTarget:X} -> hooked (managed detour, orig trampoline 0x{gvOrig:X})");
+        }
+        // run19c: GetDriveTypeW —— WindowsFileStore 卷类型 (Z: 盘不存在 -> DRIVE_NO_ROOT_DIR)。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint gdTarget = NativeLibrary.GetExport(kernelbase, "GetDriveTypeW");
+            nint gdStub = (nint)(delegate* unmanaged[Stdcall]<char*, uint>)&Managed_GetDriveTypeW;
+            nint gdOrig = HookEngine.CreateHook(gdTarget, gdStub);
+            _origGetDriveTypeW = Marshal.GetDelegateForFunctionPointer<D_GetDriveTypeW>(gdOrig);
+            _hookDelegates.Add(_origGetDriveTypeW);
+            Log($"[hooks] GetDriveTypeW @ 0x{gdTarget:X} -> hooked (managed detour, orig trampoline 0x{gdOrig:X})");
+        }
+        // run19d: GetDiskFreeSpaceExW —— FileStore.getTotalSpace/getUsableSpace (JNA/MC 存储空间检查)。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint gfTarget = NativeLibrary.GetExport(kernelbase, "GetDiskFreeSpaceExW");
+            nint gfStub = (nint)(delegate* unmanaged[Stdcall]<char*, ulong*, ulong*, ulong*, int>)&Managed_GetDiskFreeSpaceExW;
+            nint gfOrig = HookEngine.CreateHook(gfTarget, gfStub);
+            _origGetDiskFreeSpaceExW = Marshal.GetDelegateForFunctionPointer<D_GetDiskFreeSpaceExW>(gfOrig);
+            _hookDelegates.Add(_origGetDiskFreeSpaceExW);
+            Log($"[hooks] GetDiskFreeSpaceExW @ 0x{gfTarget:X} -> hooked (managed detour, orig trampoline 0x{gfOrig:X})");
+        }
 
         // Phase 3: 一次注册全部绑定(回调 + Orig), 必须在 EnableHooks 之前
         if (NativeSetCallbacks(&b) != 0)
@@ -854,7 +905,7 @@ internal static partial class FakeFileSystem
         // prologue patch(delegate + 原生两个映射)。安全窗口同旧版(JVM 尚不存在)。
         HookEngine.EnableHooks();
         _engineActive = true;
-        Log($"[hooks] 11 S2a + 4 S3a/S2b + 1 PHASE16 (NtDuplicateObject) + 1 PHASE18 (NtWriteFile) + 2 PHASE18 (NtLockFile/NtUnlockFile) native-stub detours enabled on ntdll + 8 managed detours (CreateFileW/GetFinalPathNameByHandleW*2/FindFirstFileExW/FindNextFileW/FindClose/FindFirstFileW(kernel32)/FindNextFileW(kernel32)) (suppress={NativeIsSuppressHooks()})");
+        Log($"[hooks] 11 S2a + 4 S3a/S2b + 1 PHASE16 (NtDuplicateObject) + 1 PHASE18 (NtWriteFile) + 2 PHASE18 (NtLockFile/NtUnlockFile) native-stub detours enabled on ntdll + 12 managed detours (CreateFileW/GetFinalPathNameByHandleW*2/FindFirstFileExW/FindNextFileW/FindClose/FindFirstFileW(kernel32)/FindNextFileW(kernel32)/GetVolumePathNameW/GetVolumeInformationW/GetDriveTypeW/GetDiskFreeSpaceExW) (suppress={NativeIsSuppressHooks()})");
     }
 
     /// <summary>
@@ -928,6 +979,12 @@ internal static partial class FakeFileSystem
             nameof(Managed_FindFirstFileW_kernel32), nameof(Hook_FindFirstFileW_kernel32),
             nameof(Managed_FindNextFileW_kernel32), nameof(Hook_FindNextFileW_kernel32),
             nameof(HandleFindFirstFile), nameof(HandleFindNextFile),
+            // PHASE19: CreateFileW natives 分支 + Z: 卷 API
+            nameof(Hook_CreateFileWVirtual), nameof(NtStatusToWin32),
+            nameof(Managed_GetVolumePathNameW), nameof(Hook_GetVolumePathNameW),
+            nameof(Managed_GetVolumeInformationW), nameof(Hook_GetVolumeInformationW),
+            nameof(Managed_GetDriveTypeW), nameof(Hook_GetDriveTypeW),
+            nameof(Managed_GetDiskFreeSpaceExW), nameof(Hook_GetDiskFreeSpaceExW),
         ];
         foreach (string n in hookNames)
         {
@@ -952,7 +1009,10 @@ internal static partial class FakeFileSystem
     private static D_GetFinalPathNameByHandleW? _origGetFinalPathNameByHandleW;
     private static D_GetFinalPathNameByHandleW? _origGetFinalPathNameByHandleW_kernel32;
 
-    private unsafe delegate IntPtr D_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData);
+    // 真实 ABI: FindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp,
+    // lpSearchFilter, dwAdditionalFlags) —— lpFindFileData 是第 3 参 (PHASE19 勘误: 此前误排到
+    // 第 6 位, 真输出指针被当成 fSearchOp, 第 6 参 DWORD 被当指针写 592 B -> 0xC0000005)。
+    private unsafe delegate IntPtr D_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, WIN32_FIND_DATAW* lpFindFileData, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags);
     private static D_FindFirstFileExW? _origFindFirstFileExW;
 
     private unsafe delegate int D_FindNextFileW(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData);
@@ -995,20 +1055,24 @@ internal static partial class FakeFileSystem
             string? rest = StripZPrefix(s);
             if (rest is not null)
             {
+                // ---- PHASE19: natives 虚拟可写区 (java.io 链) ---- 
+                // File.createTempFile / FileOutputStream / FileChannel 的 java.io 路径走
+                // kernelbase CreateFileW; 此前对 natives 直接透传真实 API (Z: 盘不存在必然
+                // 失败) -> JNA jnidispatch.dll 提取报 "目录不是根目录下的子目录"。
+                // 现在与 NtCreateFile 的 Hook_VirtualOpen 同机制: 虚拟文件/目录假句柄,
+                // 后续 WriteFile -> NtWriteFile / CloseHandle -> NtClose 均由既有 hook 服务。
+                if (IsVirtualPath(rest))
+                {
+                    return Hook_CreateFileWVirtual(s ?? "", rest, dwDesiredAccess, dwCreationDisposition, dwFlagsAndAttributes);
+                }
                 string key = "";
                 bool isDir = false;
                 bool containerHit = Container.Active && Container.TryMapKey(rest, out key, out isDir);
-                bool nativesHit = IsVirtualPath(rest);
-                if (containerHit || nativesHit)
+                if (containerHit)
                 {
                     _suppressHooks--;
                     try
                     {
-                        if (nativesHit)
-                        {
-                            return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
-                                dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-                        }
                         if (isDir)
                         {
                             string? real = TryMap(rest);
@@ -1128,17 +1192,17 @@ internal static partial class FakeFileSystem
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
-    private static unsafe IntPtr Managed_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData)
+    private static unsafe IntPtr Managed_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, WIN32_FIND_DATAW* lpFindFileData, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags)
     {
-        return Hook_FindFirstFileExW(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+        return Hook_FindFirstFileExW(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
     }
 
     [MethodImpl(MethodImplOptions.NoOptimization)]
-    private static unsafe IntPtr Hook_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData)
+    private static unsafe IntPtr Hook_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, WIN32_FIND_DATAW* lpFindFileData, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags)
     {
         if (_suppressHooks > 0)
         {
-            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
         }
         _suppressHooks++;
         try
@@ -1194,13 +1258,19 @@ internal static partial class FakeFileSystem
                     }
                     else if (IsVirtualPath(parentDir))
                     {
-                        return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+                        return _origFindFirstFileExW!(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
                     }
+                    // PHASE19: 无匹配条目必须显式设置 ERROR_FILE_NOT_FOUND —— 之前直接返回
+                    // INVALID_HANDLE_VALUE 不设 last error, JDK 的 FindFirstFile 原生封装用
+                    // GetLastError() 抛 WindowsException, 会捡到线程残留错误码 (实测: 残留 18
+                    // -> "没有更多文件" FileSystemException; 残留 0 -> JDK_Canonicalize 组件
+                    // 遍历判定为不可容忍错误 -> jimage 初始化崩溃 "jimage file name is null")。
+                    SetLastError(ERROR_FILE_NOT_FOUND);
                 }
-                if (VerboseHooks) { Log($"[FindFirstFileExW] Z: not found '{s}' -> INVALID_HANDLE_VALUE"); }
+                if (VerboseHooks) { Log($"[FindFirstFileExW] Z: not found '{s}' (parent='{parentDir}', pattern='{pattern}') -> INVALID_HANDLE_VALUE"); }
                 return new IntPtr(-1);
             }
-            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
         }
         finally { _suppressHooks--; }
     }
@@ -1226,7 +1296,7 @@ internal static partial class FakeFileSystem
                 if (fs.Index >= fs.Entries.Count)
                 {
                     if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> NO_MORE_FILES"); }
-                    SetLastError(18);
+                    SetLastError(ERROR_NO_MORE_FILES);
                     return 0;
                 }
                 var entry = fs.Entries[fs.Index];
@@ -1364,8 +1434,10 @@ internal static partial class FakeFileSystem
                 {
                     return _origFindFirstFileW_kernel32!(lpFileName, lpFindFileData);
                 }
+                // PHASE19: 同 kernelbase FindFirstFileExW —— 显式设置错误码, 防 JDK 捡残留。
+                SetLastError(ERROR_FILE_NOT_FOUND);
             }
-            if (VerboseHooks) { Log($"[FindFirstFileW] Z: not found '{s}' -> INVALID_HANDLE_VALUE"); }
+            if (VerboseHooks) { Log($"[FindFirstFileW] Z: not found '{s}' (parent='{parentDir}', pattern='{pattern}') -> INVALID_HANDLE_VALUE"); }
             return new IntPtr(-1);
         }
         return _origFindFirstFileW_kernel32!(lpFileName, lpFindFileData);
@@ -1378,7 +1450,7 @@ internal static partial class FakeFileSystem
             if (fs.Index >= fs.Entries.Count)
             {
                 if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> NO_MORE_FILES"); }
-                SetLastError(18);
+                SetLastError(ERROR_NO_MORE_FILES);
                 return 0;
             }
             var entry = fs.Entries[fs.Index];
@@ -1388,6 +1460,227 @@ internal static partial class FakeFileSystem
             return 1;
         }
         return _origFindNextFileW_kernel32!(hFindFile, lpFindFileData);
+    }
+
+    // ---- PHASE19: CreateFileW natives 分支 (java.io 链虚拟文件服务) ----
+    /// <summary>
+    /// kernelbase CreateFileW 对 Z:\cache\natives\... 的虚拟打开/创建: 复用 Hook_VirtualOpen
+    /// (与 NtCreateFile 同语义), 把 Win32 create disposition 映射为 NT disposition, 把
+    /// NTSTATUS 结果映射为 Win32 句柄/错误码。
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe IntPtr Hook_CreateFileWVirtual(string name, string rest, uint dwDesiredAccess,
+        uint dwCreationDisposition, uint dwFlagsAndAttributes)
+    {
+        // Win32 disposition (1..5) -> NT create disposition (0..5)
+        uint ntDisposition = dwCreationDisposition switch
+        {
+            1 => 2,  // CREATE_NEW      -> FILE_CREATE
+            2 => 5,  // CREATE_ALWAYS   -> FILE_OVERWRITE_IF
+            3 => 1,  // OPEN_EXISTING   -> FILE_OPEN
+            4 => 3,  // OPEN_ALWAYS     -> FILE_OPEN_IF
+            5 => 4,  // TRUNCATE_EXISTING -> FILE_OVERWRITE
+            _ => 1,
+        };
+        // 目录判定: 路径已存在于虚拟目录表 (CreateFileW 无 FILE_DIRECTORY_FILE 标志,
+        // kernelbase 的目录打开由 BACKUP_SEMANTICS 触发, 但虚拟表已足以区分)
+        bool isDirInTable = VirtualDirs.ContainsKey(rest) && !VirtualFiles.ContainsKey(rest);
+        bool isDirRequest = isDirInTable;
+        int st = Hook_VirtualOpen(out IntPtr h, out _, name, rest, dwDesiredAccess, ntDisposition, isDirRequest);
+        if (st == 0)
+        {
+            if (VerboseHooks)
+            {
+                Log($"[CreateFileW] FAKE V{(isDirRequest ? "DIR" : "FILE")} handle=0x{h:X} '{name}' -> 'Z:\\{rest}' (mode={(HasWriteAccess(dwDesiredAccess) ? "rw" : "r")})");
+            }
+            return h;
+        }
+        SetLastError(NtStatusToWin32(st));
+        if (VerboseHooks) { Log($"[CreateFileW] VFS '{name}' failed st=0x{st:X} -> INVALID_HANDLE_VALUE"); }
+        return new IntPtr(-1);
+    }
+
+    /// <summary>NTSTATUS -> win32 last-error (CreateFileW 契约)。</summary>
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static uint NtStatusToWin32(int status)
+    {
+        return (uint)status switch
+        {
+            unchecked((uint)STATUS_OBJECT_NAME_NOT_FOUND) => ERROR_FILE_NOT_FOUND,
+            unchecked((uint)STATUS_OBJECT_NAME_COLLISION) => ERROR_ALREADY_EXISTS,
+            unchecked((uint)STATUS_SHARING_VIOLATION) => ERROR_SHARING_VIOLATION,
+            unchecked((uint)STATUS_ACCESS_DENIED) => ERROR_ACCESS_DENIED,
+            _ => ERROR_ACCESS_DENIED,
+        };
+    }
+
+    // ---- PHASE19: Z: 卷 API (Files.getFileStore / storage space) ----
+    // GetVolumePathNameW 对不存在的 Z: 盘返回 ERROR_DIR_NOT_ROOT (267) -> WindowsFileStore
+    // create 抛 FileSystemException "目录不是根目录下的子目录" -> MC "Failed retrieving storage
+    // space for jna.tmpdir" 等。卷路径/卷信息/盘类型/剩余空间全部虚拟化, 使
+    // Files.getFileStore(Z:\...) 完整可用 (剩余空间取宿主 exe 所在卷的真实值)。
+
+    private unsafe delegate int D_GetVolumePathNameW(char* lpszFileName, char* lpszVolumePathName, uint cchBufferLength);
+    private static D_GetVolumePathNameW? _origGetVolumePathNameW;
+
+    private unsafe delegate int D_GetVolumeInformationW(char* lpRootPathName, char* lpVolumeNameBuffer, uint nVolumeNameSize,
+        uint* lpVolumeSerialNumber, uint* lpMaximumComponentLength, uint* lpFileSystemFlags,
+        char* lpFileSystemNameBuffer, uint nFileSystemNameSize);
+    private static D_GetVolumeInformationW? _origGetVolumeInformationW;
+
+    private unsafe delegate uint D_GetDriveTypeW(char* lpRootPathName);
+    private static D_GetDriveTypeW? _origGetDriveTypeW;
+
+    private unsafe delegate int D_GetDiskFreeSpaceExW(char* lpDirectoryName, ulong* lpFreeBytesAvailableToCaller,
+        ulong* lpTotalNumberOfBytes, ulong* lpTotalNumberOfFreeBytes);
+    private static D_GetDiskFreeSpaceExW? _origGetDiskFreeSpaceExW;
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe int Managed_GetVolumePathNameW(char* lpszFileName, char* lpszVolumePathName, uint cchBufferLength)
+    {
+        return Hook_GetVolumePathNameW(lpszFileName, lpszVolumePathName, cchBufferLength);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe int Hook_GetVolumePathNameW(char* lpszFileName, char* lpszVolumePathName, uint cchBufferLength)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origGetVolumePathNameW!(lpszFileName, lpszVolumePathName, cchBufferLength);
+        }
+        _suppressHooks++;
+        try
+        {
+            string? s = lpszFileName is null ? null : new string(lpszFileName);
+            if (StripZPrefix(s) is not null)
+            {
+                // 虚拟 Z: 卷根固定为 "Z:\" (3 字符 + NUL)
+                if (cchBufferLength < 4)
+                {
+                    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                lpszVolumePathName[0] = 'Z';
+                lpszVolumePathName[1] = ':';
+                lpszVolumePathName[2] = '\\';
+                lpszVolumePathName[3] = '\0';
+                return 1;
+            }
+            return _origGetVolumePathNameW!(lpszFileName, lpszVolumePathName, cchBufferLength);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe int Managed_GetVolumeInformationW(char* lpRootPathName, char* lpVolumeNameBuffer, uint nVolumeNameSize,
+        uint* lpVolumeSerialNumber, uint* lpMaximumComponentLength, uint* lpFileSystemFlags,
+        char* lpFileSystemNameBuffer, uint nFileSystemNameSize)
+    {
+        return Hook_GetVolumeInformationW(lpRootPathName, lpVolumeNameBuffer, nVolumeNameSize,
+            lpVolumeSerialNumber, lpMaximumComponentLength, lpFileSystemFlags,
+            lpFileSystemNameBuffer, nFileSystemNameSize);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe int Hook_GetVolumeInformationW(char* lpRootPathName, char* lpVolumeNameBuffer, uint nVolumeNameSize,
+        uint* lpVolumeSerialNumber, uint* lpMaximumComponentLength, uint* lpFileSystemFlags,
+        char* lpFileSystemNameBuffer, uint nFileSystemNameSize)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origGetVolumeInformationW!(lpRootPathName, lpVolumeNameBuffer, nVolumeNameSize,
+                lpVolumeSerialNumber, lpMaximumComponentLength, lpFileSystemFlags,
+                lpFileSystemNameBuffer, nFileSystemNameSize);
+        }
+        _suppressHooks++;
+        try
+        {
+            string? s = lpRootPathName is null ? null : new string(lpRootPathName);
+            if (StripZPrefix(s) is not null)
+            {
+                if (lpVolumeSerialNumber != null) { *lpVolumeSerialNumber = 0; }
+                if (lpMaximumComponentLength != null) { *lpMaximumComponentLength = 255; }
+                if (lpFileSystemFlags != null) { *lpFileSystemFlags = 0; } // 非只读
+                if (lpVolumeNameBuffer != null && nVolumeNameSize > 0) { lpVolumeNameBuffer[0] = '\0'; }
+                if (lpFileSystemNameBuffer != null && nFileSystemNameSize >= 5)
+                {
+                    lpFileSystemNameBuffer[0] = 'N';
+                    lpFileSystemNameBuffer[1] = 'T';
+                    lpFileSystemNameBuffer[2] = 'F';
+                    lpFileSystemNameBuffer[3] = 'S';
+                    lpFileSystemNameBuffer[4] = '\0';
+                }
+                if (VerboseHooks) { Log($"[GetVolumeInformation] FAKE Z: volume (serial=0 ntfs)"); }
+                return 1;
+            }
+            return _origGetVolumeInformationW!(lpRootPathName, lpVolumeNameBuffer, nVolumeNameSize,
+                lpVolumeSerialNumber, lpMaximumComponentLength, lpFileSystemFlags,
+                lpFileSystemNameBuffer, nFileSystemNameSize);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe uint Managed_GetDriveTypeW(char* lpRootPathName)
+    {
+        return Hook_GetDriveTypeW(lpRootPathName);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe uint Hook_GetDriveTypeW(char* lpRootPathName)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origGetDriveTypeW!(lpRootPathName);
+        }
+        _suppressHooks++;
+        try
+        {
+            string? s = lpRootPathName is null ? null : new string(lpRootPathName);
+            if (StripZPrefix(s) is not null)
+            {
+                return DRIVE_FIXED;
+            }
+            return _origGetDriveTypeW!(lpRootPathName);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe int Managed_GetDiskFreeSpaceExW(char* lpDirectoryName, ulong* lpFreeBytesAvailableToCaller,
+        ulong* lpTotalNumberOfBytes, ulong* lpTotalNumberOfFreeBytes)
+    {
+        return Hook_GetDiskFreeSpaceExW(lpDirectoryName, lpFreeBytesAvailableToCaller,
+            lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe int Hook_GetDiskFreeSpaceExW(char* lpDirectoryName, ulong* lpFreeBytesAvailableToCaller,
+        ulong* lpTotalNumberOfBytes, ulong* lpTotalNumberOfFreeBytes)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origGetDiskFreeSpaceExW!(lpDirectoryName, lpFreeBytesAvailableToCaller,
+                lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+        }
+        _suppressHooks++;
+        try
+        {
+            string? s = lpDirectoryName is null ? null : new string(lpDirectoryName);
+            if (StripZPrefix(s) is not null)
+            {
+                // 虚拟 Z: 卷的容量/剩余 = 宿主 exe 所在卷 (真实值)
+                string realRoot = Path.GetPathRoot(AppContext.BaseDirectory) ?? @"C:\";
+                fixed (char* pReal = realRoot)
+                {
+                    return _origGetDiskFreeSpaceExW!(pReal, lpFreeBytesAvailableToCaller,
+                        lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+                }
+            }
+            return _origGetDiskFreeSpaceExW!(lpDirectoryName, lpFreeBytesAvailableToCaller,
+                lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+        }
+        finally { _suppressHooks--; }
     }
 
     private static unsafe void FillFindData(WIN32_FIND_DATAW* p, string name, bool isDir, long length)
@@ -1467,6 +1760,10 @@ internal static partial class FakeFileSystem
         Log($"[NtCreateFile] FAKE VFILE 0x{h:X} '{s}' -> 'Z:\\{s}' ({n} B, mode={s})");
         Log($"[NtCreateFile] FAKE VDIR handle=0x{h:X} '{s}' -> 'Z:\\{s}'");
         Log($"[NtCreateFile] FAKE VFILE SHARING_VIOLATION (write open while readers) '{s}' -> 'Z:\\{s}'");
+        // PHASE19: CreateFileW natives 分支 + 卷 API log 形状
+        Log($"[CreateFileW] FAKE VDIR handle=0x{h:X} '{s}' -> 'Z:\\{s}' (mode=rw)");
+        Log($"[CreateFileW] VFS '{s}' failed st=0x{h:X} -> INVALID_HANDLE_VALUE");
+        Log($"[GetVolumeInformation] FAKE Z: volume (serial=0 ntfs)");
         // Phase 2: Directory.Exists + File.Exists now run inside the attribute/create hooks
         // (directory stat support for Z:\minecraft\... data paths) -- compile their internals now.
         bool wdir = Directory.Exists(@"C:\Windows");

@@ -156,13 +156,14 @@ dotnet publish McPack.Packager -c Release -r win-x64
 | 目录枚举 | `NtQueryDirectoryFile` `NtQueryDirectoryFileEx` |
 | 句柄 | `NtDuplicateObject` |
 | 写入与锁 | `NtWriteFile` `NtLockFile` `NtUnlockFile` |
-| **kernelbase/kernel32 托管 detour** | `CreateFileW` `GetFinalPathNameByHandleW`(×2) `FindFirstFileExW` `FindNextFileW`(×2) `FindClose` `FindFirstFileW` `FindNextFileW` |
+| **kernelbase/kernel32 托管 detour** | `CreateFileW` `GetFinalPathNameByHandleW`(×2) `FindFirstFileExW` `FindNextFileW`(×2) `FindClose` `FindFirstFileW` `FindNextFileW` `GetVolumePathNameW` `GetVolumeInformationW` `GetDriveTypeW` `GetDiskFreeSpaceExW` |
 
 关键机制：
 
 - **`Z:\` 虚拟根**：JVM 与游戏的路径访问被改写到 `Z:\openjdk\...`、`Z:\minecraft\...`，由容器条目表直接服务。
 - **假句柄表**：`NtCreateFile`/`NtOpenFile` 对容器内文件与虚拟 natives 文件返回伪造句柄（文件 `0x5100xxxx`、section `0x52000000|n`），真实句柄一律放行到原 trampoline。
-- **25H2 direct-syscall 兼容**：`kernelbase!CreateFileW` 和 `kernelbase!ReadFile` 在 Windows 25H2 上使用 direct syscall 绕过 ntdll hook。对此，`CreateFileW` 托管 detour 直接创建假句柄（容器 jar 文件），或重写路径到物化真实磁盘文件（JDK conf 文件如 `java.security`）；`GetFinalPathNameByHandleW` 托管 detour 对假句柄直接返回 `Z:\` 路径，解决 JDK 21+ `toRealPath` 的 `FileSystemException`；`FindFirstFileExW`/`FindNextFileW`/`FindClose` 托管 detour 提供虚拟目录枚举，解决 JDK 24+ 在 25H2 上目录枚举 direct syscall 绕过 `NtQueryDirectoryFile` 的问题；`FindFirstFileW`/`FindNextFileW`(kernel32) 额外挂钩防止 `kernel32` 非 forwarder 实现绕过 `kernelbase` 钩子。
+- **25H2 direct-syscall 兼容**：`kernelbase!CreateFileW` 和 `kernelbase!ReadFile` 在 Windows 25H2 上使用 direct syscall 绕过 ntdll hook。对此，`CreateFileW` 托管 detour 直接创建假句柄（容器 jar 文件、虚拟 natives 文件），或重写路径到物化真实磁盘文件（JDK conf 文件如 `java.security`）；`GetFinalPathNameByHandleW` 托管 detour 对假句柄直接返回 `Z:\` 路径，解决 JDK 21+ `toRealPath` 的 `FileSystemException`；`FindFirstFileExW`/`FindNextFileW`/`FindClose` 托管 detour 提供虚拟目录枚举，解决 JDK 24+ 在 25H2 上目录枚举 direct syscall 绕过 `NtQueryDirectoryFile` 的问题；`FindFirstFileW`/`FindNextFileW`(kernel32) 额外挂钩防止 `kernel32` 非 forwarder 实现绕过 `kernelbase` 钩子。
+- **PHASE19 修复**：① `FindFirstFile` 系无匹配时显式设置 `ERROR_FILE_NOT_FOUND`，不再让 JDK 捡到线程残留错误码（残留 18 曾表现为 `FileSystemException ... 没有更多文件`，残留 0 曾让 `JDK_Canonicalize` 判定不可容忍导致 `jimage file name is null` 崩溃）；② `CreateFileW` 对 `Z:\cache\natives\` 提供与 `NtCreateFile` 同机制的虚拟文件句柄（java.io 链），JNA `File.createTempFile`/`FileOutputStream` 可用；③ `GetVolumePathNameW`/`GetVolumeInformationW`/`GetDriveTypeW`/`GetDiskFreeSpaceExW` 对 `Z:` 卷虚拟化（`Files.getFileStore` 可用，剩余空间取宿主 exe 所在卷真实值）；④ 修正 `FindFirstFileExW` 托管 detour 的 ABI（`lpFindFileData` 是第 3 参，此前误排到第 6 位导致写 0x0 访问违例）。
 - **虚拟可写区**：仅 `Z:\cache\natives\` 子树可写，natives 提取与运行期 JNA/LWJGL/Netty 写入全走内存虚拟文件表，其余 `Z:\` 保持只读。
 - **假 `SEC_IMAGE`**：`NtCreateSection` / `NtMapViewOfSection` 对容器内 PE 文件（如 `jvm.dll`）做纯托管 PE32+ 解析 + 手工镜像布局，内存里按节加载，不落盘。
 - **JNI 进程内 JVM**：加载 `jvm.dll` → `JNI_CreateJavaVM` → 在宿主进程内直接跑 Minecraft。类路径全部是 `Z:\...` 虚拟路径。
@@ -273,9 +274,8 @@ McPack/
 
 - **gameDir 是真实目录**：存档/配置持久保存是特性；容器内打包的 mods 等不会自动进入 gameDir，需在打包器 GUI 中勾选同步清单。
 - **natives 完全虚拟化**：natives 提取与运行期 JNA/LWJGL/Netty 写入全走虚拟 `Z:\cache\natives\` 内存区，真实 `game\cache` 零 natives、`%TEMP%` 零残留。
-- **JNA `File.createTempFile` 在虚拟区不可用**：仅造成 SystemReport/OSHI 路径的 log4j WARN（装饰性，非致命），游戏照常启动到主菜单。
 - **离线单机**：Realms 登录、微软账号、多人联机登录均不可用；离线身份由 exe 文件名决定。
-- **仅 Windows x64**：ntdll hook 与 VFS 机制深度绑定 Windows 内核接口。Windows 25H2 上 `kernelbase` 部分 API（`CreateFileW`、`ReadFile`、`FindFirstFileExW`、`GetFinalPathNameByHandleW`）使用 direct syscall 绕过 ntdll hook，已通过额外的 8 个 kernelbase/kernel32 托管 detour 兼容。
+- **仅 Windows x64**：ntdll hook 与 VFS 机制深度绑定 Windows 内核接口。Windows 25H2 上 `kernelbase` 部分 API（`CreateFileW`、`ReadFile`、`FindFirstFileExW`、`GetFinalPathNameByHandleW`）使用 direct syscall 绕过 ntdll hook，已通过额外的 12 个 kernelbase/kernel32 托管 detour 兼容。
 
 ---
 
