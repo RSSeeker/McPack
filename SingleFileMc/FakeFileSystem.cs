@@ -898,15 +898,38 @@ internal static partial class FakeFileSystem
                 bool nativesHit = IsVirtualPath(rest);
                 if (mapHit || nativesHit)
                 {
-                    // MC 数据树 jar 等: 放行给 kernelbase, 由内层 NtCreateFile 经 ntdll hook 服务
-                    // (run12 回归修复: 本回调内 [ThreadStatic] _suppressHooks>0 会遮蔽内层
-                    //  ntdll hook 导致真内核收 Z: 路径 -> jar 全失败 -> ClassNotFound;
-                    //  临时放开守卫后与 run10 (无 CreateFileW hook) 语义一致)。
+                    // PHASE19: 25H2 kernelbase CreateFileW 已改用 direct-syscall (见 line 845
+                    // 注释), 原策略"释放守卫 -> 调 _origCreateFileW! -> 内层 NtCreateFile 经 ntdll
+                    // hook 服务"不再有效: direct-syscall 完全绕过 ntdll hook, 真内核收 Z: 路径
+                    // -> 全失败 -> toRealPath 抛 FileSystemException。
+                    // 新策略: 直接在本钩子内创建假句柄 (与 Hook_NtCreateFile / Hook_NtOpenFile
+                    // 同逻辑), 不再依赖内层 ntdll hook。
                     _suppressHooks--;
                     try
                     {
-                        return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
-                            dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+                        if (nativesHit)
+                        {
+                            // 虚拟 natives 区: 放行给 kernelbase, 由内层 NtCreateFile hook 服务
+                            // (natives 路径不走 toRealPath, direct-syscall 不影响此场景)
+                            return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
+                                dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+                        }
+                        // 容器数据树: 直接创建假句柄 (绕过 direct-syscall)
+                        string? real = TryMap(rest);
+                        if (real is not null)
+                        {
+                            bool realIsDir = ResolveIsDir(real);
+                            if (realIsDir || File.Exists(real) || IsContainerReal(real))
+                            {
+                                NativeBuffer? buf = realIsDir ? null : ReadFileToNative(real);
+                                IntPtr h = MakeFakeHandle();
+                                FakeHandles[h] = new FakeFile { Buf = buf, Pos = 0, IsDir = realIsDir, Real = real, Name = s ?? "" };
+                                if (VerboseHooks) { Log($"[CreateFileW] FAKE handle=0x{h:X} '{s}' -> '{real}' ({buf?.Length ?? 0} B)"); }
+                                return h;
+                            }
+                        }
+                        if (VerboseHooks) { Log($"[CreateFileW] Z: not found '{s}' -> INVALID_HANDLE_VALUE"); }
+                        return new IntPtr(-1);
                     }
                     finally { _suppressHooks++; }
                 }
