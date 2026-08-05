@@ -7,6 +7,8 @@
     <Nullable>enable</Nullable>
     <CETCompat>false</CETCompat>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- PHASE19: 打包器/游戏 exe 共用图标 (assets/app.ico) -->
+    <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
 
     <!-- PHASE11-AOT: NativeAOT 单文件发布 (dotnet publish -c Release -r win-x64)。
          运行时零 JIT + 纯原生单 exe(尾部 zip 无 .NET bundle 冲突)。

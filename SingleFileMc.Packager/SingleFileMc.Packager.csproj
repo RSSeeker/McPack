@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>..\assets\app.ico</ApplicationIcon>
     <AssemblyName>SingleFileMc.Packager</AssemblyName>
     <RootNamespace>SingleFileMc.Packager</RootNamespace>
 

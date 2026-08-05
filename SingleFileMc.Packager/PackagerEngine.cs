@@ -30,6 +30,11 @@ internal sealed class PackagerEngine
         _outputPath = outputPath;
         _syncPaths = syncPaths ?? Array.Empty<string>();
         _selectedVersion = string.IsNullOrWhiteSpace(selectedVersion) ? null : selectedVersion.Trim();
+        // PHASE19: 强制单版本打包 —— 不指定版本直接拒绝, 避免静默打包全部版本
+        if (_selectedVersion is null)
+        {
+            throw new ArgumentException("必须指定要打包的版本 (selectedVersion)", nameof(selectedVersion));
+        }
     }
 
     public bool Pack(CancellationToken ct)

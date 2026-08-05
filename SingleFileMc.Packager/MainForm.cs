@@ -35,6 +35,13 @@ internal sealed class MainForm : Form
     public MainForm()
     {
         Text = "SingleFileMc 打包器";
+        // PHASE19: 窗口图标取自 exe 图标 (assets/app.ico)
+        try
+        {
+            using Icon? exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (exeIcon is not null) { Icon = (Icon)exeIcon.Clone(); }
+        }
+        catch { /* 图标缺失不影响使用 */ }
         ClientSize = new Size(720, 620);
         MinimumSize = new Size(600, 540);
         StartPosition = FormStartPosition.CenterScreen;
@@ -329,12 +336,11 @@ internal sealed class MainForm : Form
         return appData;
     }
 
-    /// <summary>扫描 versions/ 目录填充版本下拉框 ("全部版本" + 各版本 id)。</summary>
+    /// <summary>扫描 versions/ 目录填充版本下拉框 (PHASE19: 强制单版本, 无"全部版本"选项)。</summary>
     private void RefreshVersions()
     {
         string? prev = _cmbVersion.SelectedItem as string;
         _cmbVersion.Items.Clear();
-        _cmbVersion.Items.Add("全部版本");
 
         string gameDir = _txtGameDir.Text.Trim();
         if (!string.IsNullOrEmpty(gameDir))
@@ -355,7 +361,7 @@ internal sealed class MainForm : Form
         }
 
         int idx = prev is not null ? _cmbVersion.Items.IndexOf(prev) : -1;
-        _cmbVersion.SelectedIndex = Math.Max(0, idx);
+        _cmbVersion.SelectedIndex = idx >= 0 ? idx : (_cmbVersion.Items.Count > 0 ? 0 : -1);
     }
 
     /// <summary>全选/全不选 切换 (同步清单)。</summary>
@@ -432,9 +438,8 @@ internal sealed class MainForm : Form
             {
                 string instName = Path.GetFileName(inst);
                 if (string.IsNullOrEmpty(instName) || instName.StartsWith('.')) continue;
-                // 已选择具体版本时, 只列出该实例的同步目录
-                if (_cmbVersion.SelectedIndex > 0
-                    && !string.Equals(instName, _cmbVersion.SelectedItem as string, StringComparison.OrdinalIgnoreCase))
+                // PHASE19: 强制单版本 —— 只列出所选版本的同步目录
+                if (!string.Equals(instName, _cmbVersion.SelectedItem as string, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -495,12 +500,19 @@ internal sealed class MainForm : Form
             MessageBox.Show(this, "请指定输出文件路径。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        // PHASE19: 强制单版本打包 —— 必须显式选择一个版本
+        string? selectedVersion = _cmbVersion.SelectedItem as string;
+        if (string.IsNullOrEmpty(selectedVersion))
+        {
+            MessageBox.Show(this, "请选择要打包的版本 (打包器只支持单版本打包)。", "输入错误",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         SetUiState(packaging: true);
 
         _cts = new CancellationTokenSource();
         var syncPaths = _lstSync.CheckedItems.Cast<SyncEntry>().Select(e => e.Manifest).ToList();
-        string? selectedVersion = _cmbVersion.SelectedIndex > 0 ? _cmbVersion.SelectedItem as string : null;
         var engine = new PackagerEngine(gameDir, jdkDir, stubPath, outputPath, syncPaths, selectedVersion);
         engine.ProgressChanged += OnEngineProgress;
         engine.LogMessage += OnEngineLog;
