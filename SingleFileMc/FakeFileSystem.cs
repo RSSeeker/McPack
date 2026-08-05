@@ -740,6 +740,18 @@ internal static partial class FakeFileSystem
             Log($"[hooks] CreateFileW @ 0x{cwfTarget:X} -> hooked (managed detour, orig trampoline 0x{cwfOrig:X})");
         }
 
+        // run13: GetFinalPathNameByHandleW —— JDK 21+ toRealPath 调用, 内部 NtQueryObject
+        // 未 hook, 假句柄查询失败。托管 detour 挂 kernelbase!GetFinalPathNameByHandleW。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint gfnTarget = NativeLibrary.GetExport(kernelbase, "GetFinalPathNameByHandleW");
+            nint gfnStub = (nint)(delegate* unmanaged[Stdcall]<IntPtr, char*, uint, uint, uint>)&Managed_GetFinalPathNameByHandleW;
+            nint gfnOrig = HookEngine.CreateHook(gfnTarget, gfnStub);
+            _origGetFinalPathNameByHandleW = Marshal.GetDelegateForFunctionPointer<D_GetFinalPathNameByHandleW>(gfnOrig);
+            _hookDelegates.Add(_origGetFinalPathNameByHandleW);
+            Log($"[hooks] GetFinalPathNameByHandleW @ 0x{gfnTarget:X} -> hooked (managed detour, orig trampoline 0x{gfnOrig:X})");
+        }
+
         // Phase 3: 一次注册全部绑定(回调 + Orig), 必须在 EnableHooks 之前
         if (NativeSetCallbacks(&b) != 0)
         {
@@ -816,6 +828,8 @@ internal static partial class FakeFileSystem
             // run12: kernelbase CreateFileW 托管 detour (JVM FileInputStream 走 direct-syscall,
             // 绕过 ntdll hook —— conf 文件重写为物化真实路径)
             nameof(Managed_CreateFileW), nameof(Hook_CreateFileW), nameof(GetOrMaterializeConfFile), nameof(MaterializeConfTree),
+            // run13: GetFinalPathNameByHandleW 托管 detour (JDK 21+ toRealPath)
+            nameof(Managed_GetFinalPathNameByHandleW), nameof(Hook_GetFinalPathNameByHandleW),
         ];
         foreach (string n in hookNames)
         {
@@ -837,6 +851,10 @@ internal static partial class FakeFileSystem
         void* lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
     private static D_CreateFileW? _origCreateFileW;
+
+    private unsafe delegate uint D_GetFinalPathNameByHandleW(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    private static D_GetFinalPathNameByHandleW? _origGetFinalPathNameByHandleW;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe IntPtr Managed_CreateFileW(char* lpFileName, uint dwDesiredAccess, uint dwShareMode,
@@ -920,6 +938,50 @@ internal static partial class FakeFileSystem
             }
         }
         Console.WriteLine($"[prejit] materialized JDK conf tree ({ConfMaterialized.Count} files)");
+    }
+
+    // ------------------------------------------------------------------ run13: GetFinalPathNameByHandleW
+    // JDK 21+ WindowsLinkSupport.getRealPath (toRealPath) 调用 GetFinalPathNameByHandleW 获取
+    // 最终路径。其内部使用 NtQueryObject(ObjectNameInformation) 而非 NtQueryInformationFile,
+    // NtQueryObject 未 hook -> 假句柄查询失败 -> FileSystemException("找不到文件")。
+    // 方案: 托管 detour 直接挂 kernel32!GetFinalPathNameByHandleW, 假句柄返回 Z: 路径。
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe uint Managed_GetFinalPathNameByHandleW(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags)
+    {
+        return Hook_GetFinalPathNameByHandleW(hFile, lpszFilePath, cchFilePath, dwFlags);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe uint Hook_GetFinalPathNameByHandleW(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origGetFinalPathNameByHandleW!(hFile, lpszFilePath, cchFilePath, dwFlags);
+        }
+        _suppressHooks++;
+        try
+        {
+            if (FakeHandles.TryGetValue(hFile, out FakeFile? f))
+            {
+                string path = f.Name.Length > 0 ? f.Name : f.Real;
+                string final = @"\\?\" + (path.StartsWith(@"\??\") ? path[4..] : path);
+                uint need = (uint)(final.Length + 1);
+                if (need > cchFilePath)
+                {
+                    return need;
+                }
+                for (int i = 0; i < final.Length; i++)
+                {
+                    lpszFilePath[i] = final[i];
+                }
+                lpszFilePath[final.Length] = '\0';
+                if (VerboseHooks) { Log($"[GetFinalPathNameByHandle] FAKE 0x{hFile:X} -> '{final}' ({f.Name})"); }
+                return (uint)final.Length;
+            }
+            return _origGetFinalPathNameByHandleW!(hFile, lpszFilePath, cchFilePath, dwFlags);
+        }
+        finally { _suppressHooks--; }
     }
 
     /// <summary>
