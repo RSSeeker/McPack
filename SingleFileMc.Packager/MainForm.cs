@@ -61,8 +61,10 @@ internal sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 自定义同步
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 进度
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 底部按钮
         Controls.Add(layout);
 
         int row = 0;
@@ -119,9 +121,9 @@ internal sealed class MainForm : Form
             Anchor = AnchorStyles.Left,
             Margin = new Padding(0, 4, 0, 0),
         };
-        var btnRefreshSync = new Button { Text = "刷新", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 3) };
+        var btnRefreshSync = new Button { Text = "刷新", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 4) };
         btnRefreshSync.Click += (_, _) => RefreshSyncList();
-        var btnSelectAll = new Button { Text = "全选", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 3) };
+        var btnSelectAll = new Button { Text = "全选", AutoSize = true, Height = 26, Margin = new Padding(0, 0, 0, 4) };
         btnSelectAll.Click += (_, _) => ToggleSelectAll();
         syncBtnPanel.Controls.Add(btnRefreshSync);
         syncBtnPanel.Controls.Add(btnSelectAll);
@@ -131,7 +133,6 @@ internal sealed class MainForm : Form
         AddLabel(layout, "自定义同步:", row);
         _txtSyncCustom = AddTextBox(layout, row);
         var btnSyncAdd = AddButton(layout, "添加", row, OnAddSyncPath);
-        row++;
         row++;
 
         _progress = new ProgressBar
@@ -285,7 +286,7 @@ internal sealed class MainForm : Form
             AutoSize = true,
             Height = 26,
             Anchor = AnchorStyles.Left,
-            Margin = new Padding(0, 3, 0, 0),
+            Margin = new Padding(0, 4, 0, 0),
         };
         btn.Click += handler;
         panel.Controls.Add(btn, 2, row);
