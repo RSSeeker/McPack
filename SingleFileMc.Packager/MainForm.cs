@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.IO.Compression;
 using System.Linq;
-using System.Reflection;
 
 namespace SingleFileMc.Packager;
 
@@ -188,23 +187,27 @@ internal sealed class MainForm : Form
 
     private static string ExtractStub()
     {
-        using var stream = Assembly.GetExecutingAssembly()
-            .GetManifestResourceStream("SingleFileMc.stub.bin");
-        if (stream is not null)
+        if (StubData.Binary is { Length: > 0 } bytes)
         {
             string tmp = Path.Combine(Path.GetTempPath(), "SingleFileMc.stub.exe");
-            using var fs = File.Create(tmp);
-            stream.CopyTo(fs);
+            File.WriteAllBytes(tmp, bytes);
             return tmp;
         }
 
         string stubDir = AppContext.BaseDirectory;
-        string stub = Path.Combine(stubDir, "SingleFileMc.exe");
-        if (File.Exists(stub)) return stub;
+        string[] candidates =
+        {
+            Path.Combine(stubDir, "SingleFileMc.exe"),
+            Path.GetFullPath(Path.Combine(stubDir, "..", "SingleFileMc", "bin", "Release", "net10.0", "win-x64", "publish", "SingleFileMc.exe")),
+            Path.GetFullPath(Path.Combine(stubDir, "..", "SingleFileMc", "bin", "Debug", "net10.0", "win-x64", "publish", "SingleFileMc.exe")),
+            Path.GetFullPath(Path.Combine(stubDir, "..", "..", "..", "..", "SingleFileMc", "bin", "Release", "net10.0", "win-x64", "publish", "SingleFileMc.exe")),
+            Path.GetFullPath(Path.Combine(stubDir, "..", "..", "..", "..", "SingleFileMc", "bin", "Debug", "net10.0", "win-x64", "publish", "SingleFileMc.exe")),
+        };
 
-        stub = Path.GetFullPath(Path.Combine(stubDir, "..", "..", "..", "..",
-            "SingleFileMc", "bin", "Release", "net10.0", "win-x64", "publish", "SingleFileMc.exe"));
-        if (File.Exists(stub)) return stub;
+        foreach (string candidate in candidates)
+        {
+            if (File.Exists(candidate)) return candidate;
+        }
 
         return "";
     }

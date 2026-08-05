@@ -257,6 +257,9 @@ tools/packages.config
 JustMock/
 
 # WebDrivers
+
+# McPack generated
+SingleFileMc.Packager/StubData.g.cs
 chromedriver.exe
 geckodriver.exe
 IEDriverServer.exe
