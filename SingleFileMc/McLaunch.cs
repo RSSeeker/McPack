@@ -230,25 +230,6 @@ internal static class McLaunch
         }
     }
 
-    private static bool RulesAllow(JsonElement element)
-    {
-        if (!element.TryGetProperty("rules", out JsonElement rules)) { return true; }
-        if (rules.ValueKind != JsonValueKind.Array || rules.GetArrayLength() == 0) { return true; }
-        bool allowed = false;
-        foreach (JsonElement r in rules.EnumerateArray())
-        {
-            bool match = true;
-            if (r.TryGetProperty("os", out JsonElement os))
-            {
-                if (os.TryGetProperty("name", out JsonElement nm) && !string.Equals(nm.GetString(), "windows", StringComparison.OrdinalIgnoreCase)) { match = false; }
-                if (os.TryGetProperty("arch", out JsonElement ar) && !string.Equals(ar.GetString(), "amd64", StringComparison.OrdinalIgnoreCase)) { match = false; }
-            }
-            if (r.TryGetProperty("features", out _)) { match = false; }
-            if (match && r.TryGetProperty("action", out JsonElement act)) { allowed = act.GetString() == "allow"; }
-        }
-        return allowed;
-    }
-
     /// <summary>
     /// Construct Maven artifact path from name coordinate (e.g. "net.fabricmc:fabric-loader:0.16.10"
     /// → "net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar").
