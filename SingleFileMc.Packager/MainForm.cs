@@ -6,6 +6,15 @@ namespace SingleFileMc.Packager;
 
 internal sealed class MainForm : Form
 {
+    /// <summary>
+    /// 同步清单条目: Manifest = 写入容器 .sfmc-sync 的行 ("源|目标", 无 | 时源=目标);
+    /// Label = 界面显示文本。
+    /// </summary>
+    private sealed record SyncEntry(string Manifest, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
     private readonly TextBox _txtGameDir;
     private readonly Button _btnGameDir;
     private readonly TextBox _txtJdkDir;
@@ -291,13 +300,36 @@ internal sealed class MainForm : Form
         string gameDir = _txtGameDir.Text.Trim();
         if (string.IsNullOrEmpty(gameDir) || !Directory.Exists(gameDir)) return;
 
-        string[] commonDirs = { "mods", "resourcepacks", "shaderpacks", "config" };
+        string[] commonDirs = { "mods", "resourcepacks", "shaderpacks", "config", "saves" };
+
+        // 官方布局: 目录直接在 gameDir 根下, 容器路径 = 目标路径 (manifest 行 = "mods")
         foreach (string sub in commonDirs)
         {
             string fullPath = Path.Combine(gameDir, sub);
             if (Directory.Exists(fullPath) && HasFiles(fullPath))
             {
-                _lstSync.Items.Add(sub, false);
+                _lstSync.Items.Add(new SyncEntry(sub, sub), false);
+            }
+        }
+
+        // HMCL 实例布局: 目录在 versions\<id>\ 下 (游戏数据根仍是 gameDir), 容器源
+        // = "versions/<id>/<sub>", 但运行期 gameDir 目标是 game\<sub> —— manifest 用
+        // "源|目标" 区分, 否则会同步到 game\versions\...\mods (游戏根本不读那里)。
+        string versionsDir = Path.Combine(gameDir, "versions");
+        if (Directory.Exists(versionsDir))
+        {
+            foreach (string inst in Directory.EnumerateDirectories(versionsDir))
+            {
+                string instName = Path.GetFileName(inst);
+                if (string.IsNullOrEmpty(instName) || instName.StartsWith('.')) continue;
+                foreach (string sub in commonDirs)
+                {
+                    string fullPath = Path.Combine(inst, sub);
+                    if (!Directory.Exists(fullPath) || !HasFiles(fullPath)) continue;
+
+                    string manifest = $"versions/{instName}/{sub}|{sub}";
+                    _lstSync.Items.Add(new SyncEntry(manifest, $"{sub} (实例 {instName})"), false);
+                }
             }
         }
     }
@@ -351,7 +383,7 @@ internal sealed class MainForm : Form
         SetUiState(packaging: true);
 
         _cts = new CancellationTokenSource();
-        var syncPaths = _lstSync.CheckedItems.Cast<string>().ToList();
+        var syncPaths = _lstSync.CheckedItems.Cast<SyncEntry>().Select(e => e.Manifest).ToList();
         var engine = new PackagerEngine(gameDir, jdkDir, stubPath, outputPath, syncPaths);
         engine.ProgressChanged += OnEngineProgress;
         engine.LogMessage += OnEngineLog;

@@ -547,15 +547,30 @@ internal static class McLaunch
 
         foreach (string rawPath in paths)
         {
-            string relPath = rawPath.Trim();
-            if (string.IsNullOrEmpty(relPath)) continue;
+            // TrimStart('\uFEFF'): 兼容带 UTF-8 BOM 的清单 (手工/磁盘回退场景;
+            // 打包器 StreamWriter 默认无 BOM, 但外部工具可能写入)。
+            string entry = rawPath.Trim().TrimStart('\uFEFF');
+            if (string.IsNullOrEmpty(entry)) continue;
 
-            string targetDir = Path.Combine(GameDir, relPath);
+            // PHASE19: 清单行支持 "容器路径|gameDir目标路径" —— HMCL 实例布局下 mods 等
+            // 在容器 minecraft\versions\<id>\ 里, 但游戏实际从 game\<sub> 加载, 源和目标
+            // 不一致; 无 | 时源=目标 (官方布局, 兼容旧清单)。
+            string containerRel = entry;
+            string destRel = entry;
+            int sep = entry.IndexOf('|');
+            if (sep > 0)
+            {
+                containerRel = entry[..sep].Trim();
+                destRel = entry[(sep + 1)..].Trim();
+            }
+            if (containerRel.Length == 0 || destRel.Length == 0) continue;
+
+            string targetDir = Path.Combine(GameDir, destRel);
             Directory.CreateDirectory(targetDir);
 
             if (Container.Active)
             {
-                string containerDir = "minecraft/" + relPath.Replace('\\', '/');
+                string containerDir = "minecraft/" + containerRel.Replace('\\', '/');
                 if (!Container.HasDir(containerDir)) continue;
 
                 var children = Container.EnumerateChildren(containerDir);
@@ -569,12 +584,12 @@ internal static class McLaunch
                     byte[] data = Container.ReadAllBytes(containerKey);
                     File.WriteAllBytes(destPath, data);
                     totalCopied++;
-                    Console.WriteLine($"[mc] synced: {relPath}/{name} -> game/{relPath}/{name}");
+                    Console.WriteLine($"[mc] synced: {containerRel}/{name} -> game/{destRel}/{name}");
                 }
             }
             else
             {
-                string diskDir = Path.Combine(DiskMcRoot, relPath);
+                string diskDir = Path.Combine(DiskMcRoot, containerRel);
                 if (!Directory.Exists(diskDir)) continue;
 
                 foreach (string file in Directory.GetFiles(diskDir))
@@ -585,7 +600,7 @@ internal static class McLaunch
 
                     File.Copy(file, destPath, overwrite: false);
                     totalCopied++;
-                    Console.WriteLine($"[mc] synced: {relPath}/{name} -> game/{relPath}/{name}");
+                    Console.WriteLine($"[mc] synced: {containerRel}/{name} -> game/{destRel}/{name}");
                 }
             }
         }
