@@ -1,0 +1,52 @@
+name: Build McPack
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build NativeAOT (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake (native_hooks)
+        run: cmake -B native_hooks/build -S native_hooks
+
+      - name: Build native_hooks
+        run: cmake --build native_hooks/build --config Release
+
+      - name: Restore NUKE
+        run: dotnet restore build/_build.csproj
+
+      - name: Publish SingleFileMc (NativeAOT)
+        run: dotnet publish SingleFileMc/SingleFileMc.csproj -c Release -r win-x64
+
+      - name: Publish Packager (NativeAOT)
+        run: dotnet publish SingleFileMc.Packager/SingleFileMc.Packager.csproj -c Release -r win-x64
+
+      - name: Upload SingleFileMc
+        uses: actions/upload-artifact@v4
+        with:
+          name: SingleFileMc
+          path: SingleFileMc/bin/Release/net10.0/win-x64/publish/SingleFileMc.exe
+
+      - name: Upload Packager
+        uses: actions/upload-artifact@v4
+        with:
+          name: SingleFileMc.Packager
+          path: SingleFileMc.Packager/bin/Release/net10.0-windows/win-x64/publish/SingleFileMc.Packager.exe
