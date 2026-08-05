@@ -30,6 +30,11 @@ jobs:
       - name: Build native_hooks
         run: cmake --build native_hooks/build --config Release
 
+      - name: Copy native_hooks libs (MSVC Release subdir -> build root)
+        run: |
+          Copy-Item native_hooks/build/Release/sfmc_hooks_static.lib native_hooks/build/sfmc_hooks_static.lib
+          Copy-Item native_hooks/build/Release/sfmc_hooks_shared.dll native_hooks/build/sfmc_hooks_shared.dll -ErrorAction SilentlyContinue
+
       - name: Restore NUKE
         run: dotnet restore build/_build.csproj
 
@@ -50,3 +55,15 @@ jobs:
         with:
           name: SingleFileMc.Packager
           path: SingleFileMc.Packager/bin/Release/net10.0-windows/win-x64/publish/SingleFileMc.Packager.exe
+
+      - name: Create Pre-release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: preview-${{ github.run_number }}
+          tag_name: preview-${{ github.run_number }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            SingleFileMc/bin/Release/net10.0/win-x64/publish/SingleFileMc.exe
+            SingleFileMc.Packager/bin/Release/net10.0-windows/win-x64/publish/SingleFileMc.Packager.exe
