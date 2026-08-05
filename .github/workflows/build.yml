@@ -44,6 +44,34 @@ jobs:
       - name: Publish SingleFileMc (NativeAOT)
         run: dotnet publish SingleFileMc/SingleFileMc.csproj -c Release -r win-x64
 
+      - name: Verify stub exists
+        shell: pwsh
+        run: |
+          $stub = 'SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe'
+          if (Test-Path $stub) {
+            Write-Host "Stub found: $stub ($((Get-Item $stub).Length) bytes)"
+          } else {
+            Write-Error "Stub not found: $stub"
+            Get-ChildItem SingleFileMc/bin -Recurse -Filter SingleFileMc.exe | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+          }
+
+      - name: Generate StubData.g.cs
+        shell: pwsh
+        run: |
+          $stub = 'SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe'
+          $bytes = [IO.File]::ReadAllBytes($stub)
+          $b64 = [Convert]::ToBase64String($bytes)
+          $code = @"
+          namespace SingleFileMc.Packager;
+          internal static class StubData
+          {
+              internal static readonly byte[] Binary = System.Convert.FromBase64String(@"$b64");
+          }
+          "@
+          $out = 'SingleFileMc.Packager\StubData.g.cs'
+          [IO.File]::WriteAllText($out, $code)
+          Write-Host "Generated $out ($($bytes.Length) bytes)"
+
       - name: Publish Packager (NativeAOT)
         run: dotnet publish SingleFileMc.Packager/SingleFileMc.Packager.csproj -c Release -r win-x64
 
