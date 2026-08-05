@@ -313,15 +313,19 @@ internal static unsafe class Container
         if (!Active || string.IsNullOrEmpty(rest)) { return false; }
         string k = rest.Replace('\\', '/');
 
-        // ① 精确匹配 (Z:\openjdk\bin\java.dll -> openjdk/bin/java.dll;
-        //    Z:\minecraft\versions\x.json -> minecraft/versions/x.json)
         if (_entries.ContainsKey(k)) { return Get(k, out key, out isDir); }
 
-        // ② 无顶层名的 Z: 路径 (Z:\bin\java.dll) -> openjdk/bin/java.dll
         if (_jdkPrefix.Length > 0 && !k.StartsWith(_jdkPrefix + "/", StringComparison.OrdinalIgnoreCase))
         {
             string k2 = _jdkPrefix + "/" + k;
             if (_entries.ContainsKey(k2)) { return Get(k2, out key, out isDir); }
+        }
+
+        if (_dirs.ContainsKey(k)) { key = k; isDir = true; return true; }
+        if (_jdkPrefix.Length > 0 && !k.StartsWith(_jdkPrefix + "/", StringComparison.OrdinalIgnoreCase))
+        {
+            string k2 = _jdkPrefix + "/" + k;
+            if (_dirs.ContainsKey(k2)) { key = k2; isDir = true; return true; }
         }
         return false;
     }

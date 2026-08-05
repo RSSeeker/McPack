@@ -429,7 +429,30 @@ internal static partial class FakeFileSystem
         }
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode, Pack = 4)]
+    private unsafe struct WIN32_FIND_DATAW
+    {
+        public uint dwFileAttributes;
+        public long ftCreationTime;
+        public long ftLastAccessTime;
+        public long ftLastWriteTime;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+        public uint dwReserved0;
+        public uint dwReserved1;
+        public fixed char cFileName[260];
+        public fixed char cAlternateFileName[14];
+    }
+
+    private sealed class FakeSearch
+    {
+        public string Pattern = "";
+        public List<(string Name, bool IsDir, long Length)> Entries = new();
+        public int Index;
+    }
+
     private static readonly ConcurrentDictionary<IntPtr, FakeFile> FakeHandles = new();
+    private static readonly ConcurrentDictionary<IntPtr, FakeSearch> FakeSearches = new();
     private static int _handleCounter;
 
     // ---- PHASE18: natives 虚拟可写区 (Z:\cache\natives\ 子树, 内存不落盘) ----
@@ -509,6 +532,9 @@ internal static partial class FakeFileSystem
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool VirtualFree(IntPtr lpAddress, nuint dwSize, uint dwFreeType);
+
+    [DllImport("kernel32.dll")]
+    private static extern void SetLastError(uint dwErrCode);
 
     // ---- detour layer (Phase 3: 修改后 MinHook.NET + native 守卫 stub 桥) ----
     // HookEngine: CreateHook(target, nativeDetour) -> Orig trampoline 地址(新增原生重载);
@@ -751,6 +777,71 @@ internal static partial class FakeFileSystem
             _hookDelegates.Add(_origGetFinalPathNameByHandleW);
             Log($"[hooks] GetFinalPathNameByHandleW @ 0x{gfnTarget:X} -> hooked (managed detour, orig trampoline 0x{gfnOrig:X})");
         }
+        // run13b: kernel32!GetFinalPathNameByHandleW —— 25H2 上 kernel32 可能不再是 forwarder,
+        // 直接有独立实现, 因此 kernelbase 钩子可能不被触发。双重保险: 同时也挂 kernel32。
+        {
+            nint kernel32 = NativeLibrary.Load("kernel32.dll");
+            nint gfnTarget = NativeLibrary.GetExport(kernel32, "GetFinalPathNameByHandleW");
+            nint gfnStub = (nint)(delegate* unmanaged[Stdcall]<IntPtr, char*, uint, uint, uint>)&Managed_GetFinalPathNameByHandleW;
+            nint gfnOrig = HookEngine.CreateHook(gfnTarget, gfnStub);
+            _origGetFinalPathNameByHandleW_kernel32 = Marshal.GetDelegateForFunctionPointer<D_GetFinalPathNameByHandleW>(gfnOrig);
+            _hookDelegates.Add(_origGetFinalPathNameByHandleW_kernel32);
+            Log($"[hooks] GetFinalPathNameByHandleW(kernel32) @ 0x{gfnTarget:X} -> hooked (managed detour, orig trampoline 0x{gfnOrig:X})");
+        }
+
+        // run14: FindFirstFileExW —— JDK 24+ getRealPath 在 25H2 上可能走 FindFirstFileW
+        // (kernel32 非 forwarder 或 kernelbase 直接 syscall NtQueryDirectoryFile)。
+        // 托管 detour 挂 kernelbase!FindFirstFileExW, 为 Z: 路径提供虚拟目录枚举。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint ffeTarget = NativeLibrary.GetExport(kernelbase, "FindFirstFileExW");
+            nint ffeStub = (nint)(delegate* unmanaged[Stdcall]<char*, uint, uint, void*, uint, WIN32_FIND_DATAW*, IntPtr>)&Managed_FindFirstFileExW;
+            nint ffeOrig = HookEngine.CreateHook(ffeTarget, ffeStub);
+            _origFindFirstFileExW = Marshal.GetDelegateForFunctionPointer<D_FindFirstFileExW>(ffeOrig);
+            _hookDelegates.Add(_origFindFirstFileExW);
+            Log($"[hooks] FindFirstFileExW @ 0x{ffeTarget:X} -> hooked (managed detour, orig trampoline 0x{ffeOrig:X})");
+        }
+        // run14b: FindNextFileW —— 配套 FindFirstFileExW 的迭代器。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint fnfTarget = NativeLibrary.GetExport(kernelbase, "FindNextFileW");
+            nint fnfStub = (nint)(delegate* unmanaged[Stdcall]<IntPtr, WIN32_FIND_DATAW*, int>)&Managed_FindNextFileW;
+            nint fnfOrig = HookEngine.CreateHook(fnfTarget, fnfStub);
+            _origFindNextFileW = Marshal.GetDelegateForFunctionPointer<D_FindNextFileW>(fnfOrig);
+            _hookDelegates.Add(_origFindNextFileW);
+            Log($"[hooks] FindNextFileW @ 0x{fnfTarget:X} -> hooked (managed detour, orig trampoline 0x{fnfOrig:X})");
+        }
+        // run14c: FindClose —— 释放假搜索句柄。
+        {
+            nint kernelbase = NativeLibrary.Load("kernelbase.dll");
+            nint fcTarget = NativeLibrary.GetExport(kernelbase, "FindClose");
+            nint fcStub = (nint)(delegate* unmanaged[Stdcall]<IntPtr, int>)&Managed_FindClose;
+            nint fcOrig = HookEngine.CreateHook(fcTarget, fcStub);
+            _origFindClose = Marshal.GetDelegateForFunctionPointer<D_FindClose>(fcOrig);
+            _hookDelegates.Add(_origFindClose);
+            Log($"[hooks] FindClose @ 0x{fcTarget:X} -> hooked (managed detour, orig trampoline 0x{fcOrig:X})");
+        }
+        // run14d: FindFirstFileW(kernel32) —— 25H2 上 kernel32!FindFirstFileW 可能非 forwarder
+        // 且有独立实现 (direct syscall NtQueryDirectoryFile), 需要额外挂钩。
+        {
+            nint kernel32 = NativeLibrary.Load("kernel32.dll");
+            nint ffwTarget = NativeLibrary.GetExport(kernel32, "FindFirstFileW");
+            nint ffwStub = (nint)(delegate* unmanaged[Stdcall]<char*, WIN32_FIND_DATAW*, IntPtr>)&Managed_FindFirstFileW_kernel32;
+            nint ffwOrig = HookEngine.CreateHook(ffwTarget, ffwStub);
+            _origFindFirstFileW_kernel32 = Marshal.GetDelegateForFunctionPointer<D_FindFirstFileW_kernel32>(ffwOrig);
+            _hookDelegates.Add(_origFindFirstFileW_kernel32);
+            Log($"[hooks] FindFirstFileW(kernel32) @ 0x{ffwTarget:X} -> hooked (managed detour, orig trampoline 0x{ffwOrig:X})");
+        }
+        // run14e: FindNextFileW(kernel32) —— 配套 kernel32!FindFirstFileW 的迭代器。
+        {
+            nint kernel32 = NativeLibrary.Load("kernel32.dll");
+            nint fnfTarget = NativeLibrary.GetExport(kernel32, "FindNextFileW");
+            nint fnfStub = (nint)(delegate* unmanaged[Stdcall]<IntPtr, WIN32_FIND_DATAW*, int>)&Managed_FindNextFileW_kernel32;
+            nint fnfOrig = HookEngine.CreateHook(fnfTarget, fnfStub);
+            _origFindNextFileW_kernel32 = Marshal.GetDelegateForFunctionPointer<D_FindNextFileW_kernel32>(fnfOrig);
+            _hookDelegates.Add(_origFindNextFileW_kernel32);
+            Log($"[hooks] FindNextFileW(kernel32) @ 0x{fnfTarget:X} -> hooked (managed detour, orig trampoline 0x{fnfOrig:X})");
+        }
 
         // Phase 3: 一次注册全部绑定(回调 + Orig), 必须在 EnableHooks 之前
         if (NativeSetCallbacks(&b) != 0)
@@ -763,7 +854,7 @@ internal static partial class FakeFileSystem
         // prologue patch(delegate + 原生两个映射)。安全窗口同旧版(JVM 尚不存在)。
         HookEngine.EnableHooks();
         _engineActive = true;
-        Log($"[hooks] 11 S2a + 4 S3a/S2b + 1 PHASE16 (NtDuplicateObject) + 1 PHASE18 (NtWriteFile) + 2 PHASE18 (NtLockFile/NtUnlockFile) native-stub detours enabled on ntdll (suppress={NativeIsSuppressHooks()})");
+        Log($"[hooks] 11 S2a + 4 S3a/S2b + 1 PHASE16 (NtDuplicateObject) + 1 PHASE18 (NtWriteFile) + 2 PHASE18 (NtLockFile/NtUnlockFile) native-stub detours enabled on ntdll + 8 managed detours (CreateFileW/GetFinalPathNameByHandleW*2/FindFirstFileExW/FindNextFileW/FindClose/FindFirstFileW(kernel32)/FindNextFileW(kernel32)) (suppress={NativeIsSuppressHooks()})");
     }
 
     /// <summary>
@@ -830,6 +921,13 @@ internal static partial class FakeFileSystem
             nameof(Managed_CreateFileW), nameof(Hook_CreateFileW), nameof(GetOrMaterializeConfFile), nameof(MaterializeConfTree),
             // run13: GetFinalPathNameByHandleW 托管 detour (JDK 21+ toRealPath)
             nameof(Managed_GetFinalPathNameByHandleW), nameof(Hook_GetFinalPathNameByHandleW),
+            // run14: FindFirstFileExW/FindNextFileW/FindClose 托管 detour (JDK 24+ 25H2 direct-syscall 回退路径)
+            nameof(Managed_FindFirstFileExW), nameof(Hook_FindFirstFileExW),
+            nameof(Managed_FindNextFileW), nameof(Hook_FindNextFileW),
+            nameof(Managed_FindClose), nameof(Hook_FindClose),
+            nameof(Managed_FindFirstFileW_kernel32), nameof(Hook_FindFirstFileW_kernel32),
+            nameof(Managed_FindNextFileW_kernel32), nameof(Hook_FindNextFileW_kernel32),
+            nameof(HandleFindFirstFile), nameof(HandleFindNextFile),
         ];
         foreach (string n in hookNames)
         {
@@ -852,6 +950,22 @@ internal static partial class FakeFileSystem
     private unsafe delegate uint D_GetFinalPathNameByHandleW(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags);
 
     private static D_GetFinalPathNameByHandleW? _origGetFinalPathNameByHandleW;
+    private static D_GetFinalPathNameByHandleW? _origGetFinalPathNameByHandleW_kernel32;
+
+    private unsafe delegate IntPtr D_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData);
+    private static D_FindFirstFileExW? _origFindFirstFileExW;
+
+    private unsafe delegate int D_FindNextFileW(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData);
+    private static D_FindNextFileW? _origFindNextFileW;
+
+    private delegate int D_FindClose(IntPtr hFindFile);
+    private static D_FindClose? _origFindClose;
+
+    private unsafe delegate IntPtr D_FindFirstFileW_kernel32(char* lpFileName, WIN32_FIND_DATAW* lpFindFileData);
+    private static D_FindFirstFileW_kernel32? _origFindFirstFileW_kernel32;
+
+    private unsafe delegate int D_FindNextFileW_kernel32(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData);
+    private static D_FindNextFileW_kernel32? _origFindNextFileW_kernel32;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe IntPtr Managed_CreateFileW(char* lpFileName, uint dwDesiredAccess, uint dwShareMode,
@@ -883,9 +997,9 @@ internal static partial class FakeFileSystem
             {
                 string key = "";
                 bool isDir = false;
-                bool mapHit = Container.Active && Container.TryMapKey(rest, out key, out isDir) && !isDir;
+                bool containerHit = Container.Active && Container.TryMapKey(rest, out key, out isDir);
                 bool nativesHit = IsVirtualPath(rest);
-                if (mapHit || nativesHit)
+                if (containerHit || nativesHit)
                 {
                     _suppressHooks--;
                     try
@@ -895,7 +1009,23 @@ internal static partial class FakeFileSystem
                             return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                 dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
                         }
-                        // JDK conf 文件: 重写到物化真实磁盘 (ReadFile 也走 direct-syscall 绕过 NtReadFile hook)
+                        if (isDir)
+                        {
+                            string? real = TryMap(rest);
+                            if (real is not null)
+                            {
+                                bool realIsDir = ResolveIsDir(real);
+                                if (realIsDir)
+                                {
+                                    IntPtr h = MakeFakeHandle();
+                                    FakeHandles[h] = new FakeFile { Buf = null, Pos = 0, IsDir = true, Real = real, Name = s ?? "" };
+                                    if (VerboseHooks) { Log($"[CreateFileW] FAKE DIR handle=0x{h:X} '{s}' -> '{real}'"); }
+                                    return h;
+                                }
+                            }
+                            if (VerboseHooks) { Log($"[CreateFileW] Z: dir not found '{s}' -> INVALID_HANDLE_VALUE"); }
+                            return new IntPtr(-1);
+                        }
                         if (key.Length > 0 && key.StartsWith(Container.JdkPrefix + "/conf/", StringComparison.Ordinal))
                         {
                             string realPath = GetOrMaterializeConfFile(key);
@@ -906,17 +1036,16 @@ internal static partial class FakeFileSystem
                                     dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
                             }
                         }
-                        // 容器数据树: 直接创建假句柄 (绕过 direct-syscall)
-                        string? real = TryMap(rest);
-                        if (real is not null)
+                        string? real2 = TryMap(rest);
+                        if (real2 is not null)
                         {
-                            bool realIsDir = ResolveIsDir(real);
-                            if (realIsDir || File.Exists(real) || IsContainerReal(real))
+                            bool realIsDir = ResolveIsDir(real2);
+                            if (realIsDir || File.Exists(real2) || IsContainerReal(real2))
                             {
-                                NativeBuffer? buf = realIsDir ? null : ReadFileToNative(real);
+                                NativeBuffer? buf = realIsDir ? null : ReadFileToNative(real2);
                                 IntPtr h = MakeFakeHandle();
-                                FakeHandles[h] = new FakeFile { Buf = buf, Pos = 0, IsDir = realIsDir, Real = real, Name = s ?? "" };
-                                if (VerboseHooks) { Log($"[CreateFileW] FAKE handle=0x{h:X} '{s}' -> '{real}' ({buf?.Length ?? 0} B)"); }
+                                FakeHandles[h] = new FakeFile { Buf = buf, Pos = 0, IsDir = realIsDir, Real = real2, Name = s ?? "" };
+                                if (VerboseHooks) { Log($"[CreateFileW] FAKE handle=0x{h:X} '{s}' -> '{real2}' ({buf?.Length ?? 0} B)"); }
                                 return h;
                             }
                         }
@@ -925,8 +1054,8 @@ internal static partial class FakeFileSystem
                     }
                     finally { _suppressHooks++; }
                 }
-                if (VerboseHooks) { Log($"[CreateFileW] Z: direct open (bypass) '{s}' rest='{rest}' mapHit={mapHit}"
-                    + (mapHit ? $" key='{key}' isDir={isDir} modules={(ModulesRealPath is null ? "NULL" : "set")}" : "")
+                if (VerboseHooks) { Log($"[CreateFileW] Z: direct open (bypass) '{s}' rest='{rest}' containerHit={containerHit}"
+                    + (containerHit ? $" key='{key}' isDir={isDir}" : "")
                     + $" access=0x{dwDesiredAccess:X} flags=0x{dwFlagsAndAttributes:X} disp={dwCreationDisposition}"); }
             }
             return _origCreateFileW!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
@@ -996,6 +1125,285 @@ internal static partial class FakeFileSystem
             return _origGetFinalPathNameByHandleW!(hFile, lpszFilePath, cchFilePath, dwFlags);
         }
         finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe IntPtr Managed_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        return Hook_FindFirstFileExW(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe IntPtr Hook_FindFirstFileExW(char* lpFileName, uint fInfoLevelId, uint fSearchOp, void* lpSearchFilter, uint dwAdditionalFlags, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+        }
+        _suppressHooks++;
+        try
+        {
+            string? s = lpFileName is null ? null : new string(lpFileName);
+            string? rest = StripZPrefix(s);
+            if (rest is not null)
+            {
+                string? parentDir = null;
+                string? pattern = null;
+                int lastSep = rest.LastIndexOf('\\');
+                if (lastSep >= 0)
+                {
+                    parentDir = rest[..lastSep];
+                    pattern = rest[(lastSep + 1)..];
+                }
+                else
+                {
+                    parentDir = "";
+                    pattern = rest;
+                }
+
+                if (parentDir is not null && pattern is not null)
+                {
+                    string key = "";
+                    bool isDir = false;
+                    bool mapped = parentDir.Length == 0 || Container.TryMapKey(parentDir, out key, out isDir);
+                    if (parentDir.Length == 0) { key = ""; isDir = true; }
+                    if (Container.Active && (parentDir.Length == 0 || mapped))
+                    {
+                        if (isDir)
+                        {
+                            var children = Container.EnumerateChildren(key);
+                            var matching = new List<(string Name, bool IsDir, long Length)>();
+                            foreach (var (cname, cdir, clen) in children)
+                            {
+                                if (MatchesPattern(cname, pattern))
+                                {
+                                    matching.Add((cname, cdir, clen));
+                                }
+                            }
+                            if (matching.Count > 0)
+                            {
+                                var first = matching[0];
+                                FillFindData(lpFindFileData, first.Name, first.IsDir, first.Length);
+                                IntPtr h = MakeFakeHandle();
+                                FakeSearches[h] = new FakeSearch { Pattern = pattern, Entries = matching, Index = 1 };
+                                FakeHandles[h] = new FakeFile { Buf = null, Pos = 0, IsDir = true, Real = s ?? "", Name = s ?? "" };
+                                if (VerboseHooks) { Log($"[FindFirstFileExW] FAKE search handle=0x{h:X} '{s}' -> '{first.Name}' ({matching.Count} entries)"); }
+                                return h;
+                            }
+                        }
+                    }
+                    else if (IsVirtualPath(parentDir))
+                    {
+                        return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+                    }
+                }
+                if (VerboseHooks) { Log($"[FindFirstFileExW] Z: not found '{s}' -> INVALID_HANDLE_VALUE"); }
+                return new IntPtr(-1);
+            }
+            return _origFindFirstFileExW!(lpFileName, fInfoLevelId, fSearchOp, lpSearchFilter, dwAdditionalFlags, lpFindFileData);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe int Managed_FindNextFileW(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        return Hook_FindNextFileW(hFindFile, lpFindFileData);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe int Hook_FindNextFileW(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origFindNextFileW!(hFindFile, lpFindFileData);
+        }
+        _suppressHooks++;
+        try
+        {
+            if (FakeSearches.TryGetValue(hFindFile, out FakeSearch? fs))
+            {
+                if (fs.Index >= fs.Entries.Count)
+                {
+                    if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> NO_MORE_FILES"); }
+                    SetLastError(18);
+                    return 0;
+                }
+                var entry = fs.Entries[fs.Index];
+                fs.Index++;
+                FillFindData(lpFindFileData, entry.Name, entry.IsDir, entry.Length);
+                if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> '{entry.Name}' ({fs.Index}/{fs.Entries.Count})"); }
+                return 1;
+            }
+            return _origFindNextFileW!(hFindFile, lpFindFileData);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static int Managed_FindClose(IntPtr hFindFile)
+    {
+        return Hook_FindClose(hFindFile);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static int Hook_FindClose(IntPtr hFindFile)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origFindClose!(hFindFile);
+        }
+        _suppressHooks++;
+        try
+        {
+            if (FakeSearches.TryRemove(hFindFile, out _))
+            {
+                FakeHandles.TryRemove(hFindFile, out _);
+                if (VerboseHooks) { Log($"[FindClose] FAKE 0x{hFindFile:X} closed"); }
+                return 1;
+            }
+            return _origFindClose!(hFindFile);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe IntPtr Managed_FindFirstFileW_kernel32(char* lpFileName, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        return Hook_FindFirstFileW_kernel32(lpFileName, lpFindFileData);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe IntPtr Hook_FindFirstFileW_kernel32(char* lpFileName, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origFindFirstFileW_kernel32!(lpFileName, lpFindFileData);
+        }
+        _suppressHooks++;
+        try
+        {
+            return HandleFindFirstFile(lpFileName, lpFindFileData);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static unsafe int Managed_FindNextFileW_kernel32(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        return Hook_FindNextFileW_kernel32(hFindFile, lpFindFileData);
+    }
+
+    [MethodImpl(MethodImplOptions.NoOptimization)]
+    private static unsafe int Hook_FindNextFileW_kernel32(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        if (_suppressHooks > 0)
+        {
+            return _origFindNextFileW_kernel32!(hFindFile, lpFindFileData);
+        }
+        _suppressHooks++;
+        try
+        {
+            return HandleFindNextFile(hFindFile, lpFindFileData);
+        }
+        finally { _suppressHooks--; }
+    }
+
+    private static unsafe IntPtr HandleFindFirstFile(char* lpFileName, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        string? s = lpFileName is null ? null : new string(lpFileName);
+        string? rest = StripZPrefix(s);
+        if (rest is not null)
+        {
+            string? parentDir = null;
+            string? pattern = null;
+            int lastSep = rest.LastIndexOf('\\');
+            if (lastSep >= 0)
+            {
+                parentDir = rest[..lastSep];
+                pattern = rest[(lastSep + 1)..];
+            }
+            else
+            {
+                parentDir = "";
+                pattern = rest;
+            }
+
+            if (parentDir is not null && pattern is not null)
+            {
+                string key = "";
+                bool isDir = false;
+                bool mapped = parentDir.Length == 0 || Container.TryMapKey(parentDir, out key, out isDir);
+                if (parentDir.Length == 0) { key = ""; isDir = true; }
+                if (Container.Active && (parentDir.Length == 0 || mapped))
+                {
+                    if (isDir)
+                    {
+                        var children = Container.EnumerateChildren(key);
+                        var matching = new List<(string Name, bool IsDir, long Length)>();
+                        foreach (var (cname, cdir, clen) in children)
+                        {
+                            if (MatchesPattern(cname, pattern))
+                            {
+                                matching.Add((cname, cdir, clen));
+                            }
+                        }
+                        if (matching.Count > 0)
+                        {
+                            var first = matching[0];
+                            FillFindData(lpFindFileData, first.Name, first.IsDir, first.Length);
+                            IntPtr h = MakeFakeHandle();
+                            FakeSearches[h] = new FakeSearch { Pattern = pattern, Entries = matching, Index = 1 };
+                            FakeHandles[h] = new FakeFile { Buf = null, Pos = 0, IsDir = true, Real = s ?? "", Name = s ?? "" };
+                            if (VerboseHooks) { Log($"[FindFirstFileW] FAKE search handle=0x{h:X} '{s}' -> '{first.Name}' ({matching.Count} entries)"); }
+                            return h;
+                        }
+                    }
+                }
+                else if (IsVirtualPath(parentDir))
+                {
+                    return _origFindFirstFileW_kernel32!(lpFileName, lpFindFileData);
+                }
+            }
+            if (VerboseHooks) { Log($"[FindFirstFileW] Z: not found '{s}' -> INVALID_HANDLE_VALUE"); }
+            return new IntPtr(-1);
+        }
+        return _origFindFirstFileW_kernel32!(lpFileName, lpFindFileData);
+    }
+
+    private static unsafe int HandleFindNextFile(IntPtr hFindFile, WIN32_FIND_DATAW* lpFindFileData)
+    {
+        if (FakeSearches.TryGetValue(hFindFile, out FakeSearch? fs))
+        {
+            if (fs.Index >= fs.Entries.Count)
+            {
+                if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> NO_MORE_FILES"); }
+                SetLastError(18);
+                return 0;
+            }
+            var entry = fs.Entries[fs.Index];
+            fs.Index++;
+            FillFindData(lpFindFileData, entry.Name, entry.IsDir, entry.Length);
+            if (VerboseHooks) { Log($"[FindNextFileW] FAKE 0x{hFindFile:X} -> '{entry.Name}' ({fs.Index}/{fs.Entries.Count})"); }
+            return 1;
+        }
+        return _origFindNextFileW_kernel32!(hFindFile, lpFindFileData);
+    }
+
+    private static unsafe void FillFindData(WIN32_FIND_DATAW* p, string name, bool isDir, long length)
+    {
+        p->dwFileAttributes = isDir ? 0x10u : 0x80u;
+        p->ftCreationTime = 0;
+        p->ftLastAccessTime = 0;
+        p->ftLastWriteTime = 0;
+        p->nFileSizeHigh = (uint)(length >> 32);
+        p->nFileSizeLow = (uint)(length & 0xFFFFFFFF);
+        p->dwReserved0 = 0;
+        p->dwReserved1 = 0;
+        int nameLen = Math.Min(name.Length, 259);
+        for (int i = 0; i < nameLen; i++) { p->cFileName[i] = name[i]; }
+        p->cFileName[nameLen] = '\0';
+        p->cAlternateFileName[0] = '\0';
     }
 
     /// <summary>删除 gameDir\cache (物化 modules + natives 提取), 幂等。预热期与退出路径调用。</summary>
