@@ -47,19 +47,20 @@ jobs:
       - name: Verify stub exists
         shell: pwsh
         run: |
-          $stub = 'SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe'
-          if (Test-Path $stub) {
-            Write-Host "Stub found: $stub ($((Get-Item $stub).Length) bytes)"
+          $stub = Get-ChildItem -Path SingleFileMc/bin -Recurse -Filter SingleFileMc.exe | Select-Object -First 1
+          if ($stub) {
+            Write-Host "Stub found: $($stub.FullName) ($($stub.Length) bytes)"
           } else {
-            Write-Error "Stub not found: $stub"
-            Get-ChildItem SingleFileMc/bin -Recurse -Filter SingleFileMc.exe | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+            Write-Error "Stub not found anywhere under SingleFileMc/bin"
+            Get-ChildItem SingleFileMc/bin -Recurse | ForEach-Object { Write-Host $_.FullName }
           }
 
       - name: Generate StubData.g.cs
         shell: pwsh
         run: |
-          $stub = 'SingleFileMc\bin\Release\net10.0\win-x64\publish\SingleFileMc.exe'
-          $bytes = [IO.File]::ReadAllBytes($stub)
+          $stub = Get-ChildItem -Path SingleFileMc/bin -Recurse -Filter SingleFileMc.exe | Select-Object -First 1
+          if (-not $stub) { Write-Error "Stub not found"; exit 1 }
+          $bytes = [IO.File]::ReadAllBytes($stub.FullName)
           $b64 = [Convert]::ToBase64String($bytes)
           $code = @"
           namespace SingleFileMc.Packager;
