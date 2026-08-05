@@ -227,7 +227,23 @@ internal static class McLaunch
             {
                 yield return v.GetString() ?? "";
             }
-        }
+       return allowed;
+    }
+
+    /// <summary>
+    /// Construct Maven artifact path from name coordinate (e.g. "net.fabricmc:fabric-loader:0.16.10"
+    /// → "net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar").
+    /// Fallback for libraries that lack the standard downloads.artifact.path structure (Fabric, etc.).
+    /// </summary>
+    private static string? MavenPathFromName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        string[] parts = name.Split(':');
+        if (parts.Length < 3) return null;
+        string group = parts[0].Replace('.', '/');
+        string artifact = parts[1];
+        string version = parts[2];
+        return $"{group}/{artifact}/{version}/{artifact}-{version}.jar";
     }
 
     /// <summary>
@@ -317,10 +333,18 @@ internal static class McLaunch
             total++;
             if (!RulesAllow(lib)) { continue; }
             allowed++;
-            if (!lib.TryGetProperty("downloads", out JsonElement dl)) { continue; }
-            if (!dl.TryGetProperty("artifact", out JsonElement art) || !art.TryGetProperty("path", out JsonElement pt)) { continue; }
-            string rel = pt.GetString() ?? "";
-            if (rel.Length == 0) { continue; }
+            string? rel = null;
+            if (lib.TryGetProperty("downloads", out JsonElement dl) &&
+                dl.TryGetProperty("artifact", out JsonElement art) &&
+                art.TryGetProperty("path", out JsonElement pt))
+            {
+                rel = pt.GetString();
+            }
+            if (string.IsNullOrEmpty(rel) && lib.TryGetProperty("name", out JsonElement nm))
+            {
+                rel = MavenPathFromName(nm.GetString() ?? "");
+            }
+            if (string.IsNullOrEmpty(rel)) { continue; }
             cp.Add(LibrariesDir + @"\" + rel.Replace('/', '\\'));
             string relKey = RelLibrariesKey + "/" + rel;   // 容器键 (与 zip 条目一致)
             // 容器激活时缺失检查走容器 (磁盘可能不存在, 容器是最终数据源)
