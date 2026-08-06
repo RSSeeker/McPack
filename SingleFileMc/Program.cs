@@ -36,7 +36,7 @@ internal static class Program
     /// (PrepareMethod 反射预热 / GetMethod) 无意义且触发 AOT 反射告警, 统一跳过。</summary>
     public static bool IsAot => !RuntimeFeature.IsDynamicCodeSupported;
 
-    private static int Main()
+    private static int Main(string[] args)
     {
         // JIT safety (S3a): disable tiered compilation as early as possible. The authoritative
         // knob is the runtimeconfig option (System.Runtime.TieredCompilation=false, see csproj);
@@ -44,6 +44,16 @@ internal static class Program
         AppContext.SetSwitch("System.Runtime.TieredCompilation", false);
 
         Console.OutputEncoding = Encoding.UTF8;
+
+        // 双显卡强制独显: 写入 GpuPreference=2 并按需重启一次 (任何 hook/JVM 初始化之前, 纯注册表 + DXGI)。
+        // 返回 true 表示已重启出子进程, 本实例直接干净退出 (无 detour, CLR teardown 安全)。
+#pragma warning disable CA1416 // 本程序为 Windows-only (ntdll hook 链)
+        if (GpuPreference.TryApplyAndMaybeRelaunch(args))
+        {
+            return 0;
+        }
+#pragma warning restore CA1416
+
         Console.WriteLine("=== SingleFileMc: JVM over VFS (fake file I/O Z: -> container zip | real disk alias + JNI + fake SEC_IMAGE) ===");
 
         // 阶段 2: 容器数据源 —— 宿主最早期 mmap 自身 exe 并解析尾部 Store zip。

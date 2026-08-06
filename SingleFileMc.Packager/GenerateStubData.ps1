@@ -1,4 +1,18 @@
-$stub = Get-ChildItem -Path "$PSScriptRoot\..\SingleFileMc\bin" -Recurse -Filter SingleFileMc.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+# Prefer the NativeAOT publish output (bin\Release\...\win-x64\publish\SingleFileMc.exe, a standalone
+# native exe). Recursive enumeration order is not guaranteed, so never take the first match blindly:
+# the Debug JIT build is a framework-dependent ~160KB exe that cannot run standalone when packaged.
+$candidates = Get-ChildItem -Path "$PSScriptRoot\..\SingleFileMc\bin" -Recurse -Filter SingleFileMc.exe -ErrorAction SilentlyContinue
+$stub = $candidates | Where-Object { $_.FullName -match '\\publish\\' } |
+    Sort-Object { $_.FullName -match '\\Release\\' } -Descending |
+    Select-Object -First 1
+if (-not $stub) {
+    $stub = $candidates | Where-Object { $_.FullName -match '\\Release\\' } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+}
+if (-not $stub) {
+    $stub = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
 
 if (-not $stub) {
     Write-Host "Stub file not found, generating empty stub."

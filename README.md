@@ -69,6 +69,15 @@ McPack 包含两个部分：
 | 变量 | 取值 | 作用 |
 |---|---|---|
 | `MCPACK_VERBOSE_HOOKS` | `1` / `true` | 开启 ntdll hook 全量日志 |
+| `MCPACK_NO_GPU_FORCE` | `1` / `true` | 关闭强制独显（不写 GPU 偏好、不自动重启） |
+
+### 强制独显（双显卡笔记本）
+
+游戏进程名是 `SingleFileMc.exe`，Windows/NVIDIA 不认识该进程时默认把它分给核显。
+启动器启动时会把自己写入 `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`
+（`GpuPreference=2`，即 Windows 图形设置里的"高性能"），检测到混合显卡（核显+独显）后
+自动重启自身一次让偏好生效，之后每次启动都直接走独显，无需手动配置 NVIDIA 控制面板。
+可用环境变量 `MCPACK_NO_GPU_FORCE=1` 完全关闭。
 
 ---
 
