@@ -50,13 +50,14 @@ internal sealed class MainForm : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 游戏目录
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // JDK
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 输出文件
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 打包版本
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 同步到 game/
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 自定义同步
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 进度
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F)); // 日志区(填满剩余空间)
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); // 底部按钮
         Controls.Add(layout);
 
@@ -140,18 +141,21 @@ internal sealed class MainForm : Form
         _lblProgress = new Label
         {
             Text = "就绪",
-            AutoSize = true,
+            Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Anchor = AnchorStyles.Left,
         };
-        var progressPanel = new FlowLayoutPanel
+        var progressPanel = new TableLayoutPanel
         {
-            FlowDirection = FlowDirection.TopDown,
-            AutoSize = true,
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
             Margin = new Padding(0, 6, 0, 4),
         };
-        progressPanel.Controls.Add(_progress);
-        progressPanel.Controls.Add(_lblProgress);
+        progressPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        progressPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); // 进度条
+        progressPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 18)); // 状态文本
+        progressPanel.Controls.Add(_progress, 0, 0);
+        progressPanel.Controls.Add(_lblProgress, 0, 1);
         layout.Controls.Add(progressPanel, 1, row);
         layout.SetColumnSpan(progressPanel, 2);
         row++;
